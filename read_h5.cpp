@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <hdf5/serial/H5Cpp.h>   // Cambia a <H5Cpp.h> si da error
 
+// g++ -O3 -std=c++17 -fopenmp -march=native read_h5.cpp -o read_h5 $(pkg-config --cflags --libs hdf5) -lhdf5_cpp
+
 static std::vector<pipnn::id_t> brute_force_knn(
         const std::vector<float>& data, int n,
         const std::vector<float>& queries, int nq,
