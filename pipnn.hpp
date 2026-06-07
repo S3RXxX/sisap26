@@ -101,7 +101,10 @@ inline dist_t l2_sq(const float* __restrict__ a,
 inline dist_t neg_dot(const float* __restrict__ a,
                       const float* __restrict__ b, int d) noexcept {
     dist_t s = 0;
-    for (int i = 0; i < d; ++i) s += a[i]*b[i];
+    for (int i = 0; i < d; ++i) 
+    {
+        s += a[i]*b[i];
+    }
     return -s; // negated so smaller = more similar
 }
 
@@ -118,6 +121,7 @@ static void all_pairs_dist(const float* A, int nA,
                            bool use_mips,
                            std::vector<dist_t>& D) {
     // Transpose B: BT[k*nB+j] = B[j*d+k]  → inner loop is sequential
+
     std::vector<float> BT((size_t)d * nB);
     for (int j = 0; j < nB; ++j)
         for (int k = 0; k < d; ++k)
@@ -126,6 +130,7 @@ static void all_pairs_dist(const float* A, int nA,
     D.assign((size_t)nA * nB, 0.f);
 
     if (use_mips) {
+            
         // D[i][j] = –<A[i], B[j]>
         for (int i = 0; i < nA; ++i) {
             dist_t* Di       = D.data() + (size_t)i * nB;

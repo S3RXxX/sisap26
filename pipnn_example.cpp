@@ -18,7 +18,14 @@ static std::vector<float> rand_vecs(int n, int d, uint64_t seed = 0) {
     std::mt19937_64 rng(seed);
     std::normal_distribution<float> nd;
     std::vector<float> v((size_t)n * d);
-    for (auto& x : v) x = nd(rng);
+    float v_norm = 0;
+    for (auto& x : v) 
+    {
+        x = nd(rng);
+        v_norm += x*x;
+    }
+    v_norm = std::sqrt(v_norm);
+    for (auto& x : v) x = x/v_norm;
     return v;
 }
 
@@ -52,15 +59,15 @@ static std::vector<pipnn::id_t> brute_force_mip(
 
     for (int qi = 0; qi < nq; ++qi) {
         const float* q = queries.data() + (size_t)qi * d;
-
         std::vector<std::pair<float, uint32_t>> scores(n);
 
         for (int i = 0; i < n; ++i) {
             const float* p = data.data() + (size_t)i * d;
-
             float ip = 0.0f;
             for (int j = 0; j < d; ++j)
+            {
                 ip += q[j] * p[j];
+            }
 
             scores[i] = {-ip, (uint32_t)i};
         }
@@ -91,7 +98,7 @@ static long ms_since(clk::time_point t0) {
 int main() {
     const int N   = 200'000;
     const int NQ  = 1'000;
-    const int DIM = 128;
+    const int DIM = 10;
     const int K   = 10;
 
     printf("=== PiPNN demo  n=%d  nq=%d  dim=%d  k=%d ===\n\n", N, NQ, DIM, K);
@@ -102,8 +109,8 @@ int main() {
     // Ground-truth exact k-NN
     printf("Computing ground truth...\n");
     auto t0  = clk::now();
-    auto gt  = brute_force_knn(data, N, queries, NQ, DIM, K);
-    // auto gt  = brute_force_mip(data, N, queries, NQ, DIM, K);
+    // auto gt  = brute_force_knn(data, N, queries, NQ, DIM, K);
+    auto gt  = brute_force_mip(data, N, queries, NQ, DIM, K);
     printf("  exact k-NN:  %ld ms\n\n", ms_since(t0));
 
 
@@ -129,7 +136,7 @@ int main() {
         cfg.back_edge_pass = true;   // <- new
         // cfg.medoid_sample  = 2000;   // <- new
 
-        cfg.use_mips      = false;
+        cfg.use_mips      = true;
 
         pipnn::IndexOpt idx(cfg);
         t0 = clk::now();
@@ -198,9 +205,9 @@ int main() {
         cfg.hash_bits    = 12;
         cfg.reservoir_cap= 128;
         cfg.alpha        = 1.2f;
-        cfg.beam_width   = 128;
+        cfg.beam_width   = 128 *2;
 
-        cfg.use_mips      = false; // true for inner product, false for L2 ////// (ip not working)
+        cfg.use_mips      = true; // true for inner product, false for L2 ////// (ip not working)
 
         pipnn::Index idx(cfg);
         t0 = clk::now();
@@ -235,7 +242,7 @@ int main() {
         cfg.back_edge_pass = true;   // <- new
         cfg.medoid_sample  = 2000;   // <- new
 
-        cfg.use_mips      = false;
+        cfg.use_mips      = true;
 
         pipnn::IndexV2 idx(cfg);
         t0 = clk::now();
@@ -289,7 +296,7 @@ int main() {
         cfg.back_edge_pass = true;
         cfg.medoid_sample  = 2000;
 
-        cfg.use_mips      = false;
+        cfg.use_mips      = true;
 
         pipnn::IndexV2 idx(cfg);
         idx.build(data.data(), N);

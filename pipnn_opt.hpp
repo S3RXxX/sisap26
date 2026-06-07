@@ -32,6 +32,7 @@
  */
 #include "pipnn_fast.hpp"
 #include <cstring>
+#include <iostream>
 
 // ── AVX2 availability ────────────────────────────────────────────────────────
 #if defined(__AVX2__) && defined(__FMA__)
@@ -73,22 +74,32 @@ inline dist_t l2_sq_fast(const float* __restrict__ a,
 
 inline dist_t neg_dot_fast(const float* __restrict__ a,
                             const float* __restrict__ b, int d) noexcept {
-#if PIPNN_AVX2
-    __m256 acc = _mm256_setzero_ps();
-    int i = 0;
-    for (; i + 8 <= d; i += 8)
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a+i), _mm256_loadu_ps(b+i), acc);
-    __m128 lo  = _mm256_castps256_ps128(acc);
-    __m128 hi  = _mm256_extractf128_ps(acc, 1);
-    lo = _mm_add_ps(lo, hi);
-    lo = _mm_hadd_ps(lo, lo);
-    lo = _mm_hadd_ps(lo, lo);
-    float s = _mm_cvtss_f32(lo);
-    for (; i < d; ++i) s += a[i]*b[i];
-    return -s;
-#else
+// #if PIPNN_AVX2
+//     __m256 acc = _mm256_setzero_ps();
+//     int i = 0;
+//     for (; i + 8 <= d; i += 8)
+//         acc = _mm256_fmadd_ps(_mm256_loadu_ps(a+i), _mm256_loadu_ps(b+i), acc);
+//     __m128 lo  = _mm256_castps256_ps128(acc);
+//     __m128 hi  = _mm256_extractf128_ps(acc, 1);
+//     lo = _mm_add_ps(lo, hi);
+//     lo = _mm_hadd_ps(lo, lo);
+//     lo = _mm_hadd_ps(lo, lo);
+//     float s = _mm_cvtss_f32(lo);
+//     float a_norm = _mm_cvtss_f32(lo);
+//     float b_norm = _mm_cvtss_f32(lo);
+//     for (; i < d; ++i) 
+//     {
+//         s += a[i]*b[i];
+//         a_norm += a[i]*a[i];
+//         b_norm += b[i]*b[i];
+//     }
+//     a_norm = std::sqrt(a_norm);
+//     b_norm = std::sqrt(b_norm);
+//     s = (a_norm > 0.0f && b_norm > 0.0f) ? s / (a_norm * b_norm): 0.0f;
+//     return -s;
+// #else
     return neg_dot(a, b, d);
-#endif
+// #endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,26 +153,46 @@ static void rbc_recurse_opt(
         tl_na .resize(bn);
         tl_D  .resize((size_t)bn * nl);
         tl_idx.resize(nl);
-
         for (int i = 0; i < bn; ++i) {
-            const float* pi = data + (size_t)pts[i0+i] * d;
-            float s = 0;
-            for (int k = 0; k < d; ++k) s += pi[k]*pi[k];
-            tl_na[i] = s;
-        }
-        for (int i = 0; i < bn; ++i) {
-            float* Di = tl_D.data() + (size_t)i * nl;
-            for (int j = 0; j < nl; ++j) Di[j] = tl_na[i] + nb[j];
-        }
-        for (int i = 0; i < bn; ++i) {
-            float*       Di  = tl_D.data() + (size_t)i * nl;
-            const float* pi  = data + (size_t)pts[i0+i] * d;
-            for (int k = 0; k < d; ++k) {
-                float pik        = pi[k];
-                const float* BTk = BT.data() + (size_t)k * nl;
-                for (int j = 0; j < nl; ++j) Di[j] -= 2.f * pik * BTk[j];
+                const float* pi = data + (size_t)pts[i0+i] * d;
+                float s = 0;
+                for (int k = 0; k < d; ++k) s += pi[k]*pi[k];
+                tl_na[i] = s;
+            }
+        if (cfg.use_mips)
+        {
+            
+            for (int i = 0; i < bn; ++i) {
+                float*       Di  = tl_D.data() + (size_t)i * nl;
+                const float* pi  = data + (size_t)pts[i0+i] * d;
+                for (int k = 0; k < d; ++k) {
+                    float pik        = pi[k];
+                    const float* BTk = BT.data() + (size_t)k * nl;
+                    for (int j = 0; j < nl; ++j) {
+                        Di[j] -= pik * BTk[j];
+                        // #pragma omp critical
+                        // std::cout << "D" << i << j << " == "<<Di[j] << std::endl;
+                    }
+                }
             }
         }
+        else
+        {
+            for (int i = 0; i < bn; ++i) {
+                float* Di = tl_D.data() + (size_t)i * nl;
+                for (int j = 0; j < nl; ++j) Di[j] = tl_na[i] + nb[j];
+            }
+            for (int i = 0; i < bn; ++i) {
+                float*       Di  = tl_D.data() + (size_t)i * nl;
+                const float* pi  = data + (size_t)pts[i0+i] * d;
+                for (int k = 0; k < d; ++k) {
+                    float pik        = pi[k];
+                    const float* BTk = BT.data() + (size_t)k * nl;
+                    for (int j = 0; j < nl; ++j) Di[j] -= 2.f * pik * BTk[j];
+                }
+            }
+        }
+        
 
         // Opt-A: nth_element instead of partial_sort
         for (int i = 0; i < bn; ++i) {

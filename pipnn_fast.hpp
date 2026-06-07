@@ -51,9 +51,8 @@ static void all_pairs_tl(const float* A, int nA,
             tl_BT[(size_t)k * nB + j] = B[(size_t)j * d + k];
 
     D.resize((size_t)nA * nB);
-
+    std::fill(D.begin(), D.end(), 0.f);
     if (use_mips) {
-        std::fill(D.begin(), D.end(), 0.f);
         for (int i = 0; i < nA; ++i) {
             dist_t* Di      = D.data() + (size_t)i * nB;
             const float* Ai = A + (size_t)i * d;
