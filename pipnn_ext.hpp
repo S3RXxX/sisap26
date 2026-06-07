@@ -355,7 +355,7 @@ inline float recall_at_k(const std::vector<id_t>& approx,
     int hits = 0;
     for (int qi = 0; qi < nq; ++qi) {
         const id_t* a = approx.data() + (size_t)qi * k;
-        const id_t* e = exact .data() + (size_t)qi * k;
+        const id_t* e = exact .data() + (size_t)qi * 1000;
         for (int i = 0; i < k; ++i)
             for (int j = 0; j < k; ++j)
                 if (a[i] == e[j]) { ++hits; break; }

@@ -347,12 +347,12 @@ static void rbc_recurse(
         }
     }
     if (!orphans.empty()) {
-        int bi = -1;
+        std::vector<int> valid;
         for (int i = 0; i < nl; ++i)
-            if (!buckets[i].empty() && (bi < 0 || buckets[i].size() > buckets[bi].size()))
-                bi = i;
-        if (bi >= 0) for (id_t p : orphans) buckets[bi].push_back(p);
-        // (if all buckets empty this depth, orphans are just dropped; shouldn't happen)
+            if (!buckets[i].empty()) valid.push_back(i);
+        if (!valid.empty())
+            for (int oi = 0; oi < (int)orphans.size(); ++oi)
+                buckets[valid[oi % valid.size()]].push_back(orphans[oi]);
     }
 
     // ── Recurse ──────────────────────────────────────────────────────────────
