@@ -105,7 +105,7 @@ inline dist_t neg_dot(const float* __restrict__ a,
     {
         s += a[i]*b[i];
     }
-    return -s; // negated so smaller = more similar
+    return s; // negated so smaller = more similar
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ static void all_pairs_dist(const float* A, int nA,
             for (int k = 0; k < d; ++k) {
                 float aik            = Ai[k];
                 const float* BTk     = BT.data() + (size_t)k * nB;
-                for (int j = 0; j < nB; ++j) Di[j] -= aik * BTk[j];
+                for (int j = 0; j < nB; ++j) Di[j] += aik * BTk[j];
             }
         }
     } else {
@@ -193,7 +193,7 @@ static void robust_prune(
             if (z == NO_ID) continue;
             const float* zv = data + (size_t)z * d;
             dist_t dyz = use_mips ? neg_dot(yv, zv, d) : l2_sq(yv, zv, d);
-            if (alpha * dyz < dz) z = NO_ID;    // prune z
+            if (alpha * dyz >= dz) z = NO_ID;    // prune z
         }
     }
 }
@@ -219,7 +219,7 @@ struct HashReservoir {
         // O(sz) scan – sz ≤ 128, fast in practice
         for (int i = 0; i < sz; ++i) {
             if (buf[i].hash == h) {
-                if (d < buf[i].dist) buf[i] = {h, id, d};
+                if (d >= buf[i].dist) buf[i] = {h, id, d};
                 return;
             }
         }
@@ -227,8 +227,8 @@ struct HashReservoir {
         // Full: evict furthest if new is closer
         int fi = 0;
         for (int i = 1; i < sz; ++i)
-            if (buf[i].dist > buf[fi].dist) fi = i;
-        if (d < buf[fi].dist) buf[fi] = {h, id, d};
+            if (buf[i].dist <= buf[fi].dist) fi = i;
+        if (d >= buf[fi].dist) buf[fi] = {h, id, d};
     }
 
     void flush(std::vector<std::pair<dist_t, id_t>>& out) const {
@@ -333,7 +333,7 @@ static void rbc_recurse(
             dist_t dd = cfg.use_mips ? neg_dot(pi, lj, d) : l2_sq(pi, lj, d);
             ld[j] = {dd, j};
         }
-        std::partial_sort(ld.begin(), ld.begin() + fanout, ld.end());
+        std::partial_sort(ld.begin(), ld.begin() + fanout, ld.end(), std::greater<>());
         for (int f = 0; f < fanout; ++f)
             buckets[ld[f].second].push_back(pts[i]);
     }
@@ -623,7 +623,7 @@ private:
             dists[i] = res[i].first;
         }
         // Pad remaining slots
-        for (int i = out_k; i < k; ++i) { ids[i] = NO_ID; dists[i] = INF_D; }
+        for (int i = out_k; i < k; ++i) { ids[i] = NO_ID; dists[i] = -INF_D; }
     }
 };
 
