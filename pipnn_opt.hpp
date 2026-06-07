@@ -32,6 +32,7 @@
  */
 #include "pipnn_fast.hpp"
 #include <cstring>
+// #include <chrono>
 
 // ── AVX2 availability ────────────────────────────────────────────────────────
 #if defined(__AVX2__) && defined(__FMA__)
@@ -119,6 +120,7 @@ static void rbc_recurse_opt(
     if      (depth == 0) fanout = cfg.top_fanout;
     else if (depth == 1) fanout = cfg.second_fanout;
     fanout = std::min(fanout, nl);
+    // printf("Depth %d, fanout %d, n %d\n", depth, fanout, n);
 
     // Pre-transpose + norms for leaders (once per level)
     std::vector<float> BT((size_t)d * nl), nb(nl, 0.f);
@@ -182,6 +184,7 @@ static void rbc_recurse_opt(
         for (int f = 0; f < fanout; ++f)
             buckets[p2l[(size_t)i * fanout + f]].push_back(pts[i]);
 
+    ////////////////////////////////////////////////////
     std::vector<id_t> orphans;
     for (auto& b : buckets) {
         if ((int)b.size() < cfg.min_leaf_size) {
@@ -189,12 +192,20 @@ static void rbc_recurse_opt(
             b.clear();
         }
     }
+    // if (!orphans.empty()) {
+    //     int bi = -1;
+    //     for (int i = 0; i < nl; ++i)
+    //         if (!buckets[i].empty() && (bi<0 || buckets[i].size()>buckets[bi].size()))
+    //             bi = i;
+    //     if (bi >= 0) for (id_t p : orphans) buckets[bi].push_back(p);
+    // }
     if (!orphans.empty()) {
-        int bi = -1;
+        std::vector<int> valid;
         for (int i = 0; i < nl; ++i)
-            if (!buckets[i].empty() && (bi<0 || buckets[i].size()>buckets[bi].size()))
-                bi = i;
-        if (bi >= 0) for (id_t p : orphans) buckets[bi].push_back(p);
+            if (!buckets[i].empty()) valid.push_back(i);
+        if (!valid.empty())
+            for (int oi = 0; oi < (int)orphans.size(); ++oi)
+                buckets[valid[oi % valid.size()]].push_back(orphans[oi]);
     }
     for (auto& b : buckets)
         if (!b.empty())
@@ -343,16 +354,24 @@ public:
 #ifdef _OPENMP
         if (cfg_.num_threads > 0) omp_set_num_threads(cfg_.num_threads);
 #endif
-
+        auto t0PiPNN = clk::now();
+        auto t0PiPNNrecur  = clk::now();
+        auto t0PiPNN1  = clk::now();
+        auto t0PiPNN2  = clk::now();
+        auto t0PiPNN3 = clk::now();
         // ── LSH sketches ─────────────────────────────────────────────────
+        t0PiPNN  = clk::now();
         lsh_.init(m, d, cfg_.seed);
         sketches_.resize((size_t)n * m);
 #pragma omp parallel for schedule(static)
         for (int i = 0; i < n; ++i)
             lsh_.compute_sketch(data + (size_t)i * d,
                                 sketches_.data() + (size_t)i * m);
+        printf("  PiPNN (1):  %ld ms\n\n", ms_since(t0PiPNN));
+        t0PiPNN  = clk::now();
 
         // ── RBC + leaf edges ──────────────────────────────────────────────
+        t0PiPNN1  = clk::now();
         std::vector<std::vector<std::pair<dist_t,id_t>>> cands(n);
         std::mt19937_64 rng(cfg_.seed);
 
@@ -361,11 +380,15 @@ public:
             std::iota(all.begin(), all.end(), 0);
             Partition leaves;
             // Opt-A: rbc with nth_element
+            t0PiPNNrecur  = clk::now();
             rbc_recurse_opt(data, d, all, cfg_, 0, rng, leaves);
+            printf("  PiPNN (recur opt):  %ld ms\n\n", ms_since(t0PiPNNrecur));
 
             int nl = (int)leaves.size();
             using E4 = std::tuple<id_t,id_t,dist_t,dist_t>;
             std::vector<std::vector<E4>> leaf_edges(nl);
+            printf("  PiPNN (2.1):  %ld ms\n\n", ms_since(t0PiPNN1));
+            t0PiPNN1  = clk::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
             for (int li = 0; li < nl; ++li) {
@@ -396,12 +419,18 @@ public:
                     }
                 }
             }
+            printf("  PiPNN (2.2):  %ld ms\n\n", ms_since(t0PiPNN1));
+            t0PiPNN1  = clk::now();
             for (int li=0;li<nl;li++)
                 for (auto& [s,t,df,db]:leaf_edges[li]){
                     cands[s].emplace_back(df,t);
                     cands[t].emplace_back(db,s);
                 }
+            printf("  PiPNN (2.3):  %ld ms\n\n", ms_since(t0PiPNN1));
         }
+
+        printf("  PiPNN (2):  %ld ms\n\n", ms_since(t0PiPNN));
+        t0PiPNN  = clk::now();
 
         // ── HashPrune ────────────────────────────────────────────────────
         std::vector<HashReservoir> res(n);
@@ -417,6 +446,9 @@ public:
         }
         { decltype(cands)().swap(cands); }
         { std::vector<float>().swap(sketches_); }
+
+        printf("  PiPNN (3):  %ld ms\n\n", ms_since(t0PiPNN));
+        t0PiPNN  = clk::now();
 
         // ── Opt-B: build flat graph ──────────────────────────────────────
         g_.init(n, R);
@@ -440,14 +472,23 @@ public:
             }
         }
 
+        printf("  PiPNN (4):  %ld ms\n\n", ms_since(t0PiPNN));
+        t0PiPNN  = clk::now();
+
+        t0PiPNN1  = clk::now();
         // ── Back-edge pass using flat graph ──────────────────────────────
         if (cfg_.back_edge_pass)
             back_edges_flat(g_, data, n, d, cfg_.alpha, cfg_.use_mips);
+        printf("  PiPNN (back edges):  %ld ms\n\n", ms_since(t0PiPNN1));
 
+        t0PiPNN1  = clk::now();
         // ── Opt-D: diverse entry points ──────────────────────────────────
         entries_ = diverse_entries(data, n, d,
                                    cfg_.k_entry, cfg_.use_mips,
                                    cfg_.entry_sample, cfg_.seed);
+        printf("  PiPNN (diverse entries):  %ld ms\n\n", ms_since(t0PiPNN1));
+        printf("  PiPNN (extras):  %ld ms\n\n", ms_since(t0PiPNN));
+        // t0PiPNN  = clk::now();
     }
 
     // ── Query ────────────────────────────────────────────────────────────────

@@ -92,7 +92,7 @@ int main() {
     const int N   = 200'000;
     const int NQ  = 1'000;
     const int DIM = 128;
-    const int K   = 10;
+    const int K   = 15;
 
     printf("=== PiPNN demo  n=%d  nq=%d  dim=%d  k=%d ===\n\n", N, NQ, DIM, K);
 
@@ -102,8 +102,8 @@ int main() {
     // Ground-truth exact k-NN
     printf("Computing ground truth...\n");
     auto t0  = clk::now();
-    auto gt  = brute_force_knn(data, N, queries, NQ, DIM, K);
-    // auto gt  = brute_force_mip(data, N, queries, NQ, DIM, K);
+    // auto gt  = brute_force_knn(data, N, queries, NQ, DIM, K);
+    auto gt  = brute_force_mip(data, N, queries, NQ, DIM, K);
     printf("  exact k-NN:  %ld ms\n\n", ms_since(t0));
 
 
@@ -125,11 +125,12 @@ int main() {
         cfg.hash_bits      = 12;
         cfg.reservoir_cap  = 128;
         cfg.alpha          = 1.2f;
-        cfg.beam_width     = 128;
-        cfg.back_edge_pass = true;   // <- new
+        cfg.beam_width     = 256;
+        cfg.back_edge_pass = false;   // <- new
         // cfg.medoid_sample  = 2000;   // <- new
+        cfg.final_prune   = false;
 
-        cfg.use_mips      = false;
+        cfg.use_mips      = true;
 
         pipnn::IndexOpt idx(cfg);
         t0 = clk::now();
@@ -198,7 +199,7 @@ int main() {
         cfg.hash_bits    = 12;
         cfg.reservoir_cap= 128;
         cfg.alpha        = 1.2f;
-        cfg.beam_width   = 128;
+        cfg.beam_width   = 512;
 
         cfg.use_mips      = false; // true for inner product, false for L2 ////// (ip not working)
 

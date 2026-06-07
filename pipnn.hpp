@@ -37,12 +37,18 @@
 #include <random>
 #include <tuple>
 #include <vector>
+#include <chrono>
 #ifdef _OPENMP
 #  include <omp.h>
 #endif
 
 namespace pipnn {
 
+
+using clk = std::chrono::steady_clock;
+static long ms_since(clk::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(clk::now()-t0).count();
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Scalar types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -317,8 +323,10 @@ static void rbc_recurse(
     if      (depth == 0) fanout = cfg.top_fanout;
     else if (depth == 1) fanout = cfg.second_fanout;
     fanout = std::min(fanout, nl);
+    
 
     // ── Assign each point to its nearest <fanout> leaders ───────────────────
+    // auto t0PiPNN = clk::now();
     std::vector<std::vector<id_t>> buckets(nl);
     for (int i = 0; i < n; ++i) {
         const float* pi = data + (size_t)pts[i] * d;
@@ -328,10 +336,13 @@ static void rbc_recurse(
             dist_t dd = cfg.use_mips ? neg_dot(pi, lj, d) : l2_sq(pi, lj, d);
             ld[j] = {dd, j};
         }
+        
         std::partial_sort(ld.begin(), ld.begin() + fanout, ld.end());
+        
         for (int f = 0; f < fanout; ++f)
             buckets[ld[f].second].push_back(pts[i]);
     }
+    // printf("  PiPNN (partial sort):  %ld ms\n\n", ms_since(t0PiPNN));
 
     // ── Merge tiny buckets into the largest available bucket ─────────────────
     std::vector<id_t> orphans;
@@ -342,13 +353,24 @@ static void rbc_recurse(
         }
     }
     if (!orphans.empty()) {
-        int bi = -1;
+        std::vector<int> valid;
         for (int i = 0; i < nl; ++i)
-            if (!buckets[i].empty() && (bi < 0 || buckets[i].size() > buckets[bi].size()))
-                bi = i;
-        if (bi >= 0) for (id_t p : orphans) buckets[bi].push_back(p);
-        // (if all buckets empty this depth, orphans are just dropped; shouldn't happen)
+            if (!buckets[i].empty()) valid.push_back(i);
+        if (!valid.empty())
+            for (int oi = 0; oi < (int)orphans.size(); ++oi)
+                buckets[valid[oi % valid.size()]].push_back(orphans[oi]);
     }
+    // if (!orphans.empty()) {
+    //     int bi = -1;
+    //     for (int i = 0; i < nl; ++i)
+    //         if (!buckets[i].empty() && (bi < 0 || buckets[i].size() > buckets[bi].size()))
+    //             bi = i;
+    //     if (bi >= 0) for (id_t p : orphans) buckets[bi].push_back(p);
+    //     // (if all buckets empty this depth, orphans are just dropped; shouldn't happen)
+    // }
+    // printf("Depth %d, fanout %d, n %d, nl %d, orphans %d\n", depth, fanout, n, nl, (int)orphans.size());
+    // for (int i = 0; i < nl; ++i)
+    //     printf("  Bucket %d size: %d\n", i, (int)buckets[i].size());
 
     // ── Recurse ──────────────────────────────────────────────────────────────
     for (auto& b : buckets)
@@ -382,6 +404,7 @@ public:
         const int m   = cfg_.hash_bits;
 
         // ── 1. Compute LSH sketches for all points ────────────────────────────
+        auto t0PiPNN  = clk::now();
         lsh_.init(m, d, cfg_.seed);
         sketches_.resize((size_t)n * m);
 
@@ -389,11 +412,19 @@ public:
         for (int i = 0; i < n; ++i)
             lsh_.compute_sketch(data + (size_t)i * d,
                                 sketches_.data() + (size_t)i * m);
+        
+        printf("  PiPNN (1):  %ld ms\n\n", ms_since(t0PiPNN));
 
         // ── 2. RBC partitioning + leaf edge collection ────────────────────────
         // We collect directed edges (src → dst, dist) from all leaves/replicas.
         // Using per-replica/leaf edge lists and a final serial merge avoids
         // data races while keeping parallel leaf processing.
+
+        t0PiPNN  = clk::now();
+        auto t0PiPNN1  = clk::now();
+        auto t0PiPNN2  = clk::now();
+        auto t0PiPNN3  = clk::now();
+        auto t0PiPNN2recur  = clk::now();
 
         // edge_cands[src] = vector of (dist, dst) — grown from leaves
         std::vector<std::vector<std::pair<dist_t, id_t>>> edge_cands(n);
@@ -407,7 +438,10 @@ public:
             std::iota(all.begin(), all.end(), 0);
             Partition leaves;
             leaves.reserve(n / cfg_.leaf_size * 2);
+            
+            t0PiPNN2recur  = clk::now();
             rbc_recurse(data, d, all, cfg_, 0, rng, leaves);
+            printf("  PiPNN (2.1recur):  %ld ms\n\n", ms_since(t0PiPNN2recur));
 
             int nl = (int)leaves.size();
 
@@ -415,6 +449,8 @@ public:
             // We keep per-leaf edge lists to avoid write conflicts.
             using Edge4 = std::tuple<id_t, id_t, dist_t, dist_t>; // src,dst,d_fwd,d_bwd
             std::vector<std::vector<Edge4>> leaf_edges(nl);
+            printf("  PiPNN (2.1):  %ld ms\n\n", ms_since(t0PiPNN1));
+            t0PiPNN2  = clk::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
             for (int li = 0; li < nl; ++li) {
@@ -460,6 +496,8 @@ public:
                     }
                 }
             }
+            printf("  PiPNN (2.2):  %ld ms\n\n", ms_since(t0PiPNN2));
+            t0PiPNN3  = clk::now();
 
             // Serial merge of leaf edges into per-point candidate lists
             for (int li = 0; li < nl; ++li) {
@@ -468,9 +506,13 @@ public:
                     edge_cands[dst].emplace_back(d_bwd, src);
                 }
             }
+            printf("  PiPNN (2.3):  %ld ms\n\n", ms_since(t0PiPNN3));
         } // replicas
 
+        printf("  PiPNN (2):  %ld ms\n\n", ms_since(t0PiPNN));
+
         // ── 3. HashPrune per point (parallel, race-free) ──────────────────────
+        t0PiPNN  = clk::now();
         std::vector<HashReservoir> reservoirs(n);
 
 #pragma omp parallel for schedule(static)
@@ -489,7 +531,10 @@ public:
         { std::vector<std::vector<std::pair<dist_t,id_t>>>().swap(edge_cands); }
         { std::vector<float>().swap(sketches_); }
 
+        printf("  PiPNN (3):  %ld ms\n\n", ms_since(t0PiPNN));
+
         // ── 4. Build final adjacency (+ optional RobustPrune) ─────────────────
+        t0PiPNN  = clk::now();
         graph_.resize(n);
 
         if (cfg_.final_prune) {
@@ -515,6 +560,7 @@ public:
         }
 
         entry_ = 0; // simple fixed entry point; could be improved with medoid
+        printf("  PiPNN (4):  %ld ms\n\n", ms_since(t0PiPNN));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
