@@ -228,14 +228,18 @@ def main():
         log(f"  itest/queries: {itest_q_raw.shape}")
 
         # itest ground truth  (path from config gt_I, e.g. allknn/knns)
-        log(f"Loading itest ground truth from /{'/'.join(gt_I)} ...")
-        try:
-            igt_raw = resolve_gt_path(h5, gt_I)[:]
-        except KeyError:
-            # Fallback: try itest/knns
-            log(f"  Not found, falling back to itest/knns")
-            igt_raw = h5["itest"]["knns"][:]
-        log(f"  shape: {igt_raw.shape}")
+        # log(f"Loading itest ground truth from /{'/'.join(gt_I)} ...")
+        # try:
+        #     igt_raw = resolve_gt_path(h5, gt_I)[:]
+        # except KeyError:
+        #     # Fallback: try itest/knns
+        #     log(f"  Not found, falling back to itest/knns")
+        #     igt_raw = h5["itest"]["knns"][:]
+        # log(f"  shape: {igt_raw.shape}")
+        # itest ground truth
+        log("Loading itest ground truth ...")
+        igt_raw = h5["itest"]["knns"][:]
+        log(f"  itest/knns: {igt_raw.shape}")
 
         # otest queries
         log("Loading otest queries ...")
