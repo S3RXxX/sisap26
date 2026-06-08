@@ -151,28 +151,44 @@ static void rbc_recurse_opt(
             for (int k = 0; k < d; ++k) s += pi[k]*pi[k];
             tl_na[i] = s;
         }
-        for (int i = 0; i < bn; ++i) {
-            float* Di = tl_D.data() + (size_t)i * nl;
-            for (int j = 0; j < nl; ++j) Di[j] = tl_na[i] + nb[j];
-        }
-        for (int i = 0; i < bn; ++i) {
-            float*       Di  = tl_D.data() + (size_t)i * nl;
-            const float* pi  = data + (size_t)pts[i0+i] * d;
-            for (int k = 0; k < d; ++k) {
-                float pik        = pi[k];
-                const float* BTk = BT.data() + (size_t)k * nl;
-                for (int j = 0; j < nl; ++j) Di[j] -= 2.f * pik * BTk[j];
+        if (cfg.use_mips)
+        {
+            for (int i = 0; i < bn; ++i) {
+                float*       Di  = tl_D.data() + (size_t)i * nl;
+                const float* pi  = data + (size_t)pts[i0+i] * d;
+                for (int k = 0; k < d; ++k) {
+                    float pik        = pi[k];
+                    const float* BTk = BT.data() + (size_t)k * nl;
+                    for (int j = 0; j < nl; ++j) {
+                        Di[j] -= pik * BTk[j]; //neg inner product
+                    }
+                }
             }
         }
-
+        else
+        {
+            for (int i = 0; i < bn; ++i) {
+                float* Di = tl_D.data() + (size_t)i * nl;
+                for (int j = 0; j < nl; ++j) Di[j] = tl_na[i] + nb[j];
+            }
+            for (int i = 0; i < bn; ++i) {
+                float*       Di  = tl_D.data() + (size_t)i * nl;
+                const float* pi  = data + (size_t)pts[i0+i] * d;
+                for (int k = 0; k < d; ++k) {
+                    float pik        = pi[k];
+                    const float* BTk = BT.data() + (size_t)k * nl;
+                    for (int j = 0; j < nl; ++j) Di[j] -= 2.f * pik * BTk[j];
+                }
+            }
+        }
         // Opt-A: nth_element instead of partial_sort
         for (int i = 0; i < bn; ++i) {
             const float* row = tl_D.data() + (size_t)i * nl;
             std::iota(tl_idx.begin(), tl_idx.end(), 0);
             // nth_element: O(nl) average vs partial_sort O(nl*log fanout)
             std::nth_element(tl_idx.begin(), tl_idx.begin() + fanout,
-                             tl_idx.end(),
-                             [&](int a, int b){ return row[a] < row[b]; });
+                            tl_idx.end(),
+                            [&](int a, int b){ return row[a] < row[b]; }); //affects distance
             // No need to sort within the top-fanout; bucket assignment is unordered
             int* out = p2l.data() + (i0 + i) * fanout;
             for (int f = 0; f < fanout; ++f) out[f] = tl_idx[f];
@@ -309,20 +325,20 @@ static std::vector<id_t> diverse_entries(
     for (int si = 0; si < sample_sz; ++si)
         for (int sj = 0; sj < sample_sz; ++sj)
             cost[si] += df(sample[si], sample[sj]);
-    int best_si = (int)(std::min_element(cost.begin(), cost.end()) - cost.begin());
+    int best_si = (int)(std::min_element(cost.begin(), cost.end()) - cost.begin()); //affects distance
 
     std::vector<id_t> entries;
     entries.push_back(sample[best_si]);
 
     // Greedy: each new entry maximises min-distance to existing entries
-    std::vector<float> min_d(sample_sz, INF_D);
+    std::vector<float> min_d(sample_sz, INF_D); //The min distance can be -1 and the max 1 if we use ip
     for (int e = 1; e < k_entry && e < n; ++e) {
         id_t prev = entries.back();
-        float  best_val = -1;
+        float  best_val = -2; // afect distance!!! si es ip maybe se tiene que inicializar a un número más pequeno
         id_t   best_id  = sample[0];
         for (int si = 0; si < sample_sz; ++si) {
-            float d2prev = df(sample[si], prev);
-            min_d[si]    = std::min(min_d[si], d2prev);
+            float d2prev = df(sample[si], prev); //calculate distance
+            min_d[si]    = std::min(min_d[si], d2prev); // min distance between mind and prev
             if (min_d[si] > best_val) { best_val = min_d[si]; best_id = sample[si]; }
         }
         entries.push_back(best_id);
@@ -411,7 +427,7 @@ public:
                     // Opt-A: nth_element for leaf kNN selection too
                     std::nth_element(idx.begin(), idx.begin()+k,
                                      idx.begin()+cnt,
-                                     [&](int a,int b){return row[a]<row[b];});
+                                     [&](int a,int b){return row[a]<row[b];}); //depends on distance
                     for(int ki=0;ki<k;ki++){
                         int j=idx[ki];
                         elist.emplace_back(leaf[i],leaf[j],
@@ -555,18 +571,18 @@ private:
                      id_t* ids, dist_t* dists) const {
         using P    = std::pair<dist_t, id_t>;
         using MaxQ = std::priority_queue<P>;
-        using MinQ = std::priority_queue<P, std::vector<P>, std::greater<P>>;
+        using MinQ = std::priority_queue<P, std::vector<P>, std::greater<P>>; //depends on distance
 
         // Opt-C: epoch visited (no per-query alloc)
         EpochVisited vis; vis.reset(n_);
 
-        MaxQ best;
-        MinQ frontier;
+        MaxQ best; // depends on distance
+        MinQ frontier; // depends on distance
 
         auto try_push = [&](id_t u) __attribute__((always_inline)) {
             if (vis.test_and_mark(u)) return;
-            dist_t dv = dist_fn(q, data_ + (size_t)u * cfg_.dim);
-            if ((int)best.size() < L || dv < best.top().first) {
+            dist_t dv = dist_fn(q, data_ + (size_t)u * cfg_.dim); // depends on distance
+            if ((int)best.size() < L || dv < best.top().first) { //depends on distance
                 best.push({dv,u}); frontier.push({dv,u});
                 if ((int)best.size() > L) best.pop();
             }
@@ -577,7 +593,7 @@ private:
             float best_d = INF_D; id_t  best_e = entries_[0];
             for (id_t e : entries_) {
                 float d = dist_fn(q, data_ + (size_t)e * cfg_.dim);
-                if (d < best_d) { best_d = d; best_e = e; }
+                if (d < best_d) { best_d = d; best_e = e; } // depends on distance
             }
             try_push(best_e);
         }
@@ -604,7 +620,7 @@ private:
         std::sort(res.begin(), res.end());
         int ok = std::min((int)res.size(), k);
         for (int i=0;i<ok;i++) { ids[i]=res[i].second; dists[i]=res[i].first; }
-        for (int i=ok;i<k;i++) { ids[i]=NO_ID; dists[i]=INF_D; }
+        for (int i=ok;i<k;i++) { ids[i]=NO_ID; dists[i]=INF_D; } // depends on distance (inf value)
     }
 };
 
