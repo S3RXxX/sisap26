@@ -46,6 +46,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <chrono>
 #ifdef _OPENMP
 #  include <omp.h>
 #endif
@@ -58,6 +59,10 @@
 
 namespace pipnn {
 
+using clk = std::chrono::steady_clock;
+static long ms_since(clk::time_point t0) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(clk::now()-t0).count();
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Scalar types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -514,14 +519,23 @@ public:
         if (cfg_.num_threads > 0) omp_set_num_threads(cfg_.num_threads);
 #endif
 
-        // LSH sketches (metric-agnostic; used by HashPrune)
+        // 1. LSH sketches (metric-agnostic; used by HashPrune)
+        auto t0PiPNN  = clk::now();
         lsh_.init(m, d, cfg_.seed);
         sketches_.resize((size_t)n * m);
 #pragma omp parallel for schedule(static)
         for (int i = 0; i < n; ++i)
             lsh_.sketch(data + (size_t)i*d, sketches_.data() + (size_t)i*m);
 
-        // RBC partitioning + leaf candidate collection
+        printf("  PiPNN (1):  %ld ms\n\n", ms_since(t0PiPNN));
+        //2. RBC partitioning + leaf candidate collection
+
+        t0PiPNN  = clk::now();
+        auto t0PiPNN1  = clk::now();
+        auto t0PiPNN2  = clk::now();
+        auto t0PiPNN3  = clk::now();
+        auto t0PiPNN2recur  = clk::now();
+
         std::vector<std::vector<std::pair<dist_t,id_t>>> cands(n);
         std::mt19937_64 rng(cfg_.seed);
 
@@ -530,11 +544,16 @@ public:
             std::iota(all.begin(), all.end(), 0);
             Partition leaves;
             leaves.reserve(n / std::max(cfg_.leaf_size,1) * 2);
+
+            t0PiPNN2recur  = clk::now();
             rbc_recurse(data, d, all, cfg_, 0, rng, leaves);
+            printf("  PiPNN (2.1recur):  %ld ms\n\n", ms_since(t0PiPNN2recur));
 
             int nl = (int)leaves.size();
             using E4 = std::tuple<id_t,id_t,dist_t,dist_t>;
             std::vector<std::vector<E4>> leaf_edges(nl);
+            printf("  PiPNN (2.1):  %ld ms\n\n", ms_since(t0PiPNN1));
+            t0PiPNN2  = clk::now();
 
 #pragma omp parallel for schedule(dynamic, 1)
             for (int li = 0; li < nl; ++li) {
@@ -545,7 +564,7 @@ public:
                 std::vector<float> ld((size_t)ln * d);
                 for (int i = 0; i < ln; ++i)
                     std::memcpy(ld.data()+(size_t)i*d,
-                                data+(size_t)leaf[i]*d, (size_t)d*4);
+                                data+(size_t)leaf[i]*d, (size_t)d*sizeof(float));
 
                 // All-pairs build-distance matrix (1-dot)
                 std::vector<dist_t> dmat;
@@ -570,16 +589,22 @@ public:
                     }
                 }
             }
+            printf("  PiPNN (2.2):  %ld ms\n\n", ms_since(t0PiPNN2));
+            t0PiPNN3  = clk::now();
 
+            // Serial merge of leaf edges into per-point candidate lists
             for (int li = 0; li < nl; ++li)
                 for (auto& [s,t,df,db] : leaf_edges[li]) {
                     cands[s].emplace_back(df, t);
                     cands[t].emplace_back(db, s);
                 }
+            printf("  PiPNN (2.3):  %ld ms\n\n", ms_since(t0PiPNN3));
         }
-
-        // HashPrune per point (parallel, race-free)
+        printf("  PiPNN (2):  %ld ms\n\n", ms_since(t0PiPNN));
+        //3. HashPrune per point (parallel, race-free)
+        t0PiPNN  = clk::now();
         std::vector<HashReservoir> res(n);
+
 #pragma omp parallel for schedule(static)
         for (int i = 0; i < n; ++i) {
             res[i].init(cfg_.reservoir_cap);
@@ -593,7 +618,10 @@ public:
         { decltype(cands)().swap(cands); }
         { std::vector<float>().swap(sketches_); }
 
-        // Build flat graph with optional RobustPrune
+        printf("  PiPNN (3):  %ld ms\n\n", ms_since(t0PiPNN));
+
+        //4. Build flat graph with optional RobustPrune
+        t0PiPNN  = clk::now();
         g_.init(n, R);
         if (cfg_.final_prune) {
 #pragma omp parallel for schedule(dynamic, 64)
@@ -620,6 +648,7 @@ public:
 
         entries_ = diverse_entries(data, n, d,
                                    cfg_.k_entry, cfg_.entry_sample, cfg_.seed);
+        printf("  PiPNN (4):  %ld ms\n\n", ms_since(t0PiPNN));
     }
 
     // ── Query ────────────────────────────────────────────────────────────────

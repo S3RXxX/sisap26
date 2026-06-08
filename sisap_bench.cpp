@@ -137,9 +137,12 @@ int main(int argc, char** argv) {
     // ── Build ──────────────────────────────────────────────────────────────
     auto cfg = pipnn::make_config(D, Nt);
     cfg.beam_width = BW;
+    cfg.final_prune = true;
+    cfg.back_edge = true;
+    cfg.leaf_size = 512;
     printf("Config: leaf_size=%d  max_degree=%d  alpha=%.1f  "
-           "k_entry=%d  beam_width=%d\n\n",
-           cfg.leaf_size, cfg.max_degree, cfg.alpha, cfg.k_entry, BW);
+           "k_entry=%d  beam_width=%d final_prune=%d\n\n",
+           cfg.leaf_size, cfg.max_degree, cfg.alpha, cfg.k_entry, BW, cfg.final_prune);
 
     pipnn::IndexDot idx(cfg);
     printf("Building index on %d vectors (dim=%d) ...\n", Nt, D);
