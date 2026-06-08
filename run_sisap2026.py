@@ -211,6 +211,17 @@ def main():
         train_raw = h5["train"][:]
         log(f"  train: {train_raw.shape} {train_raw.dtype}")
 
+
+        # allknn queries
+        log("Loading allknn queries ...")
+        allknn_q_raw = h5["train"][:]
+        log(f"  allknn/queries: {allknn_q_raw.shape}")
+
+        # allknn ground truth
+        log("Loading allknn ground truth ...")
+        allknn_raw = h5["allknn"]["knns"][:]
+        log(f"  allknn/knns: {allknn_raw.shape}")
+
         # itest queries
         log("Loading itest queries ...")
         itest_q_raw = h5["itest"]["queries"][:]
@@ -242,24 +253,31 @@ def main():
     log("=" * 60)
 
     train_norm  = l2_normalise(train_raw)
+    allknn_q_n   = l2_normalise(allknn_q_raw)
     itest_q_n   = l2_normalise(itest_q_raw)
     otest_q_n   = l2_normalise(otest_q_raw)
 
     # SISAP ground truth uses 1-based indices → convert to 0-based
+    allknn_0  = allknn_raw.astype(np.int32)
     igt_0  = igt_raw.astype(np.int32)
     ogt_0  = ogt_raw.astype(np.int32)
     if igt_0.min() > 0:
         log("  GT indices appear 1-based; converting to 0-based.")
         igt_0 -= 1
         ogt_0 -= 1
+        allknn_0 -= 1
 
     train_bin  = os.path.join(args.work, "train.bin")
+    allknn_q_bin     = os.path.join(args.work, "allknn_q.bin")
+    allknn_gt_bin    = os.path.join(args.work, "allknn_gt.bin")
     iq_bin     = os.path.join(args.work, "itest_q.bin")
     igt_bin    = os.path.join(args.work, "itest_gt.bin")
     oq_bin     = os.path.join(args.work, "otest_q.bin")
     ogt_bin    = os.path.join(args.work, "otest_gt.bin")
 
     write_vecs(train_bin,  train_norm)
+    write_vecs(allknn_q_bin, allknn_q_n)
+    write_gt  (allknn_gt_bin, allknn_0)
     write_vecs(iq_bin,     itest_q_n)
     write_gt  (igt_bin,    igt_0)
     write_vecs(oq_bin,     otest_q_n)
@@ -281,7 +299,7 @@ def main():
 
     cmd = [
         bench_bin,
-        train_bin, iq_bin, igt_bin, oq_bin, ogt_bin,
+        train_bin, allknn_q_bin, allknn_gt_bin, iq_bin, igt_bin, oq_bin, ogt_bin,
         str(args.k), str(args.bw),
     ]
     subprocess.check_call(cmd)
