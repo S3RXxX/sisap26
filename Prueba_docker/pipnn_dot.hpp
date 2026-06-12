@@ -464,7 +464,7 @@ static int rbc_recurse(const DataView& dv,
             // (if all buckets empty this depth, orphans are just dropped; shouldn't happen)
         }
     }
-    else if (cfg.randomness)
+    else if (!cfg.randomness)
     {
 
         if (!orphans.empty()) {
