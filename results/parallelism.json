@@ -1,0 +1,30 @@
+[
+  {
+    "exp_id": 1,
+    "NUM_THREADS": 0,
+    "build_time_s": 30.44,
+    "avg_degree": 47.9,
+    "max_depth": 2.0,
+    "allknn_recall": 0.9774,
+    "allknn_qps": 22307.0,
+    "itest_recall": 0.9423,
+    "itest_qps": 21882.0,
+    "otest_recall": 0.906,
+    "otest_qps": 21243.0,
+    "wall_time_s": 37.69
+  },
+  {
+    "exp_id": 2,
+    "NUM_THREADS": 1,
+    "build_time_s": 115.62,
+    "avg_degree": 47.9,
+    "max_depth": 2.0,
+    "allknn_recall": 0.9774,
+    "allknn_qps": 2492.0,
+    "itest_recall": 0.9423,
+    "itest_qps": 2470.0,
+    "otest_recall": 0.906,
+    "otest_qps": 2376.0,
+    "wall_time_s": 147.91
+  }
+]
