@@ -30,6 +30,7 @@ echo "  NUM_REPLICAS   = ${NUM_REPLICAS}"
 echo "  FINAL_PRUNE    = ${FINAL_PRUNE}"
 echo "  BACK_EDGE      = ${BACK_EDGE}"
 echo "  SEED           = ${SEED}"
+echo "  RAND           = ${RAND}"
 echo "  NUM_THREADS    = ${NUM_THREADS}"
 echo "  OMP_NUM_THREADS= ${OMP_NUM_THREADS}"
 echo "  MEMORY_LIMIT_GB= ${MEMORY_LIMIT_GB}"
@@ -66,4 +67,5 @@ exec python3 /app/run_sisap2026.py \
     --back_edge      "${BACK_EDGE}"      \
     --num_threads    "${NUM_THREADS}"    \
     --seed           "${SEED}"           \
+    --randomness     "${RAND}"           \
     "$@"   # any extra args passed directly to docker run are forwarded here

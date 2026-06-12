@@ -91,6 +91,7 @@ struct Config {
     int   num_replicas  = 1;     ///< independent RBC replications
     bool  final_prune   = true;  ///< apply RobustPrune after HashPrune
     bool  back_edge     = true;  ///< run back-edge consolidation pass
+    bool  randomness    = false;
     int   k_entry       = 12;    ///< diverse graph entry points
     int   entry_sample  = 3000;  ///< sample size for entry-point selection
     int   beam_width    = 128;   ///< default query beam width
@@ -400,7 +401,7 @@ static std::vector<id_t> diverse_entries(
 using Leaf      = std::vector<id_t>;
 using Partition = std::vector<Leaf>;
 
-static void rbc_recurse(
+static int rbc_recurse(
         const float* data, int d,
         const std::vector<id_t>& pts,
         const Config& cfg, int depth,
@@ -408,7 +409,7 @@ static void rbc_recurse(
         Partition& out_leaves) {
 
     int n = (int)pts.size();
-    if (n <= cfg.leaf_size) { out_leaves.push_back(pts); return; }
+    if (n <= cfg.leaf_size) { out_leaves.push_back(pts); return depth-1; }
 
     int nl = std::min((int)(cfg.leader_frac * n), cfg.max_leaders);
     nl = std::max(nl, 2);
@@ -487,17 +488,49 @@ static void rbc_recurse(
             b.clear();
         }
     }
-    if (!orphans.empty()) {
-        std::vector<int> valid;
-        for (int i = 0; i < nl; ++i) if (!buckets[i].empty()) valid.push_back(i);
-        if (!valid.empty())
-            for (int oi = 0; oi < (int)orphans.size(); ++oi)
-                buckets[valid[oi % valid.size()]].push_back(orphans[oi]);
-    }
+    if (cfg.randomness)
+    {
 
+        if (!orphans.empty()) {
+            std::vector<int> valid;
+            for (int i = 0; i < nl; ++i) if (!buckets[i].empty()) valid.push_back(i);
+            if (!valid.empty())
+                for (int oi = 0; oi < (int)orphans.size(); ++oi)
+                    buckets[valid[oi % valid.size()]].push_back(orphans[oi]);
+        }
+    }
+    else
+    {
+        if (!orphans.empty()) {
+            // Build weight vector: weight[i] = 1/size(bucket_i) so smaller buckets
+            // are preferred — inverse-proportional to size.
+            std::vector<double> weights(nl);
+            for (int i = 0; i < nl; ++i)
+                weights[i] = buckets[i].empty() ? 0.0 : 1.0 / buckets[i].size();
+
+            // Guard: if every bucket was orphaned (degenerate case), spread evenly.
+            double total = 0.0;
+            for (double w : weights) total += w;
+            if (total == 0.0)
+                std::fill(weights.begin(), weights.end(), 1.0);
+
+            std::discrete_distribution<int> pick(weights.begin(), weights.end());
+            for (id_t p : orphans)
+                buckets[pick(rng)].push_back(p);
+        }
+    }
+    int max_depth = 0;
+    int children_depth;
     for (auto& b : buckets)
+    {
         if (!b.empty())
-            rbc_recurse(data, d, b, cfg, depth+1, rng, out_leaves);
+        {
+            children_depth=rbc_recurse(data, d, b, cfg, depth+1, rng, out_leaves);
+            if (children_depth > max_depth)
+                max_depth = children_depth;
+        }
+    }
+    return max_depth;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -546,7 +579,8 @@ public:
             leaves.reserve(n / std::max(cfg_.leaf_size,1) * 2);
 
             t0PiPNN2recur  = clk::now();
-            rbc_recurse(data, d, all, cfg_, 0, rng, leaves);
+            int max_depth = rbc_recurse(data, d, all, cfg_, 0, rng, leaves);
+            printf("depth %i", max_depth);
             printf("  PiPNN (2.1recur):  %ld ms\n\n", ms_since(t0PiPNN2recur));
 
             int nl = (int)leaves.size();
@@ -825,6 +859,7 @@ inline Config make_config(int dim, int n) {
     cfg.num_replicas  = 1;
     cfg.final_prune   = true;
     cfg.back_edge     = true;
+    cfg.randomness    = false;
     cfg.k_entry       = std::min(n, 12);
     cfg.entry_sample  = std::min(n, 3000);
     cfg.beam_width    = 128;

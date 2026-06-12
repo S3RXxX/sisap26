@@ -70,10 +70,10 @@ static float recall(const std::vector<pipnn::id_t>& res,
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    if (argc < 9) {
+    if (argc < 7) {
         fprintf(stderr,
-            "Usage: %s train.bin allknn_q.bin allknn_gt.bin "
-            "itest_q.bin itest_gt.bin otest_q.bin otest_gt.bin k [bw] "
+            "Usage: %s train.bin itest_q.bin itest_gt.bin "
+            "otest_q.bin otest_gt.bin k [beam_width]"
             "[max_degree] [alpha] [leaf_size] [min_leaf_size] "
             "[k_entry] [entry_sample] [hash_bits] [reservoir_cap] "
             "[num_replicas] [final_prune] [back_edge] "
@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     const std::string oq_f     = argv[6];
     const std::string ogt_f    = argv[7];
     const int         K        = std::stoi(argv[8]);
-    const int         BW       = (argc >= 10) ? std::stoi(argv[9])  : 256;
+    const int         BW       = (argc >= 10) ? std::stoi(argv[9]) : 256;
     const int         MAX_DEG  = (argc >= 11) ? std::stoi(argv[10]) : 64;
     const float       ALPHA    = (argc >= 12) ? std::stof(argv[11]) : 1.2f;
     const int         LEAF_SZ  = (argc >= 13) ? std::stoi(argv[12]) : 512;
@@ -103,6 +103,7 @@ int main(int argc, char** argv) {
     const bool        B_EDGE   = (argc >= 21) ? (std::stoi(argv[20]) != 0) : true;
     const int         N_THREADS= (argc >= 22) ? std::stoi(argv[21]) : 0;
     const uint64_t    SEED     = (argc >= 23) ? (uint64_t)std::stoull(argv[22]) : 42;
+    const bool        RAND     = (argc >= 24) ? std::stoi(argv[23]) : false;
 
 #if PIPNN_AVX2
     printf("AVX2+FMA enabled\n");
@@ -153,10 +154,11 @@ int main(int argc, char** argv) {
 
     // ── Build ──────────────────────────────────────────────────────────────
     auto cfg = pipnn::make_config(D, Nt);
-    cfg.beam_width    = BW;
-    cfg.max_degree    = MAX_DEG;
-    cfg.alpha         = ALPHA;
-    cfg.leaf_size     = LEAF_SZ;
+    cfg.beam_width = BW;
+    cfg.final_prune = true;
+    cfg.back_edge = true;
+    cfg.leaf_size = 512;
+    cfg.randomness = RAND;
     cfg.min_leaf_size = MIN_LEAF;
     cfg.k_entry       = K_ENTRY;
     cfg.entry_sample  = ENT_SAMP;
@@ -170,10 +172,11 @@ int main(int argc, char** argv) {
     printf("Config: leaf_size=%d  max_degree=%d  alpha=%.2f  "
            "k_entry=%d  beam_width=%d  final_prune=%d  back_edge=%d\n"
            "        hash_bits=%d  reservoir_cap=%d  num_replicas=%d  "
-           "num_threads=%d  seed=%llu\n\n",
+           "num_threads=%d  seed=%llu  randomness=%d\n\n",
            cfg.leaf_size, cfg.max_degree, cfg.alpha, cfg.k_entry, BW,
            cfg.final_prune, cfg.back_edge, cfg.hash_bits, cfg.reservoir_cap,
-           cfg.num_replicas, cfg.num_threads, (unsigned long long)cfg.seed);
+           cfg.num_replicas, cfg.num_threads, (unsigned long long)cfg.seed, 
+           cfg.randomness);
 
     pipnn::IndexDot idx(cfg);
     printf("Building index on %d vectors (dim=%d) ...\n", Nt, D);

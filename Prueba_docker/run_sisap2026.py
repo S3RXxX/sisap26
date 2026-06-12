@@ -170,6 +170,8 @@ def main():
     parser.add_argument("--work", default="sisap_work",
                         help="Working directory for binary files and binary")
     # ── Graph build hyperparameters (forwarded to sisap_bench) ────────────────
+    parser.add_argument("--randomness",          type=int,   default=42,
+                        help="Random rbc orphans")
     parser.add_argument("--max_degree",    type=int,   default=64,
                         help="Max out-degree per node (R)")
     parser.add_argument("--alpha",         type=float, default=1.2,
@@ -283,10 +285,15 @@ def main():
     log("Step 3 – Normalise and export to binary")
     log("=" * 60)
 
-    train_norm  = l2_normalise(train_raw)
-    allknn_q_n   = l2_normalise(allknn_q_raw)
-    itest_q_n   = l2_normalise(itest_q_raw)
-    otest_q_n   = l2_normalise(otest_q_raw)
+    # train_norm  = l2_normalise(train_raw)
+    # allknn_q_n   = l2_normalise(allknn_q_raw)
+    # itest_q_n   = l2_normalise(itest_q_raw)
+    # otest_q_n   = l2_normalise(otest_q_raw)
+
+    train_norm  = train_raw.astype(np.float32, copy=False)
+    allknn_q_n   = allknn_q_raw.astype(np.float32, copy=False)
+    itest_q_n   = itest_q_raw.astype(np.float32, copy=False) 
+    otest_q_n   = otest_q_raw.astype(np.float32, copy=False)
 
     # SISAP ground truth uses 1-based indices → convert to 0-based
     allknn_0  = allknn_raw.astype(np.int32)
@@ -337,7 +344,8 @@ def main():
         str(args.k_entry), str(args.entry_sample),
         str(args.hash_bits), str(args.reservoir_cap),
         str(args.num_replicas), str(args.final_prune),
-        str(args.back_edge), str(args.num_threads), str(args.seed),
+        str(args.back_edge), str(args.num_threads),
+        str(args.seed), str(args.randomness),
     ]
     subprocess.check_call(cmd)
 
