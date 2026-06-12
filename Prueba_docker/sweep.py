@@ -44,8 +44,9 @@ PARAM_GRID = {
     # "RAND":          [0, 1],
     # "COOCKED":       [0,1],
     # "BEAM_WIDTH":     [15,16,32,64,128,256],
-    "MIN_LEAF_SIZE": [16,32,64,128],
-    "LEAF_SIZE":      [128,256, 512, 1024, 2048],
+    # "MIN_LEAF_SIZE": [16,32,64,128],
+    # "LEAF_SIZE":      [128,256, 512, 1024, 2048],
+    "BACK_EDGE":    [0,1],
     "SEED":          [42, 128, 5, 23, 47]
     # "LEAF_SIZE":   [256, 512],       # descomenta para añadir más dimensiones
     # "NUM_REPLICAS":[1, 2],
@@ -59,13 +60,13 @@ FIXED_PARAMS = {
     "ALPHA":          1.2,
     # "LEAF_SIZE":      512,
     # "MIN_LEAF_SIZE":  32,
-    "K_ENTRY":        1,
-    "ENTRY_SAMPLE":   1,
+    "K_ENTRY":        12,
+    "ENTRY_SAMPLE":   3000,
     "HASH_BITS":      12,
     "RESERVOIR_CAP":  128,
     "NUM_REPLICAS":   1,
-    "FINAL_PRUNE":    1,
-    "BACK_EDGE":      1,
+    "FINAL_PRUNE":    0,
+    # "BACK_EDGE":      1,
     "NUM_THREADS":    0,
     "MEMORY_LIMIT_GB": 0,
     "RAND":            1,
@@ -260,7 +261,7 @@ def print_summary(results: list, bw_key: str):
     valid.sort(key=lambda r: r.get(itest_col, 0), reverse=True)
 
     col_w = 10
-    header = " ".join(f"{k:<{col_w}}" for k in grid_keys + metric_keys)
+    header = " ".join(f"{k:<{col_w}}" for k in metric_keys)
     print("\n" + "─" * len(header))
     print("RESUMEN (ordenado por itest recall desc)")
     print("─" * len(header))
@@ -268,7 +269,7 @@ def print_summary(results: list, bw_key: str):
     print("─" * len(header))
     for r in valid:
         row = " ".join(
-            f"{str(r.get(k, '')):<{col_w}}" for k in grid_keys + metric_keys
+            f"{str(r.get(k, '')):<{col_w}}" for k in metric_keys
         )
         print(row)
     print("─" * len(header))
@@ -320,8 +321,8 @@ def main():
     if args.jobs == 1:
         # Secuencial — más fácil de leer el output
         for i, combo in enumerate(combos, 1):
-            if combo["MIN_LEAF_SIZE"] >= combo["LEAF_SIZE"]:
-                continue
+            # if combo["MIN_LEAF_SIZE"] >= combo["LEAF_SIZE"]:
+            #     continue
             # if combo["RAND"] == 1 and combo["COOCKED"] == 1:
             #     continue
             r = run_experiment(i, combo, args.data, args.dry_run)
