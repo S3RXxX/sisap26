@@ -46,10 +46,10 @@ static constexpr dist_t INF_D = std::numeric_limits<dist_t>::infinity();
 // ─────────────────────────────────────────────────────────────────────────────
 struct Config {
     int      dim           = 0;
-    int      max_degree    = 64;
-    float    alpha         = 1.2f;
-    int      leaf_size     = 256;
-    int      min_leaf_size = 32;
+    int      max_degree    = 64; ///< R     – max out-degree per node
+    float    alpha         = 1.2f; ///< α     – RobustPrune direction factor
+    int      leaf_size     = 256; ///< C_max – max points per leaf
+    int      min_leaf_size = 32; ///< C_min – leaves below this are merged
     float    leader_frac   = 0.05f;
     int      max_leaders   = 1000;
     int      top_fanout    = 10;

@@ -41,8 +41,11 @@ PARAM_GRID = {
     # "BEAM_WIDTH":    [128, 256, 512],
     # "MAX_DEGREE":    [32, 64, 96],
     # "ALPHA":         [1.2, 1.4],
-    "RAND":          [0, 1],
-    "COOCKED":       [0,1],
+    # "RAND":          [0, 1],
+    # "COOCKED":       [0,1],
+    # "BEAM_WIDTH":     [15,16,32,64,128,256],
+    "MIN_LEAF_SIZE": [16,32,64,128],
+    "LEAF_SIZE":      [128,256, 512, 1024, 2048],
     "SEED":          [42, 128, 5, 23, 47]
     # "LEAF_SIZE":   [256, 512],       # descomenta para añadir más dimensiones
     # "NUM_REPLICAS":[1, 2],
@@ -51,13 +54,13 @@ PARAM_GRID = {
 # Parámetros fijos (no se barren, solo se pasan como contexto)
 FIXED_PARAMS = {
     "K":              15,
-    "BEAM_WIDTH":     256,
+    "BEAM_WIDTH":     32,
     "MAX_DEGREE":     64,
     "ALPHA":          1.2,
-    "LEAF_SIZE":      512,
-    "MIN_LEAF_SIZE":  32,
-    "K_ENTRY":        12,
-    "ENTRY_SAMPLE":   3000,
+    # "LEAF_SIZE":      512,
+    # "MIN_LEAF_SIZE":  32,
+    "K_ENTRY":        1,
+    "ENTRY_SAMPLE":   1,
     "HASH_BITS":      12,
     "RESERVOIR_CAP":  128,
     "NUM_REPLICAS":   1,
@@ -65,6 +68,8 @@ FIXED_PARAMS = {
     "BACK_EDGE":      1,
     "NUM_THREADS":    0,
     "MEMORY_LIMIT_GB": 0,
+    "RAND":            1,
+    "COOCKED":         0,
 }
 
 DOCKER_IMAGE = "pipnn-sisap"
@@ -130,7 +135,7 @@ def parse_output(text: str) -> dict:
     for section in ("allknn", "itest", "otest"):
         rows = result.pop(f"{section}_rows", [])
         for row in rows:
-            prefix = f"{section}_bw{row['bw']}"
+            prefix = f"{section}"
             result[f"{prefix}_recall"] = row["recall"]
             result[f"{prefix}_qps"]    = row["qps"]
 
@@ -189,11 +194,10 @@ def run_experiment(exp_id: int, params: dict, data_dir: str, dry_run: bool) -> d
         metrics = parse_output(proc.stdout)
         metrics["wall_time_s"] = round(wall_s, 2)
 
-        # Log de la fila principal (BEAM_WIDTH del experimento)
-        bw = params.get("BEAM_WIDTH", all_params.get("BEAM_WIDTH", "?"))
+        # Log de la fila principal
         for section in ("allknn", "itest", "otest"):
-            rec = metrics.get(f"{section}_bw{bw}_recall")
-            qps = metrics.get(f"{section}_bw{bw}_qps")
+            rec = metrics.get(f"{section}_recall")
+            qps = metrics.get(f"{section}_qps")
             if rec is not None:
                 print(f"    {section:8s}  recall={rec:.4f}  qps={qps:.0f}")
         if metrics.get("max_depth") is not None:
@@ -249,7 +253,6 @@ def print_summary(results: list, bw_key: str):
         return
 
     # Columnas del grid + métricas clave
-    grid_keys = list(PARAM_GRID.keys())
     metric_keys = [k for k in valid[0] if k.endswith("_recall") or k == "build_time_s"]
 
     # Ordena por itest recall del beam principal (si existe)
@@ -317,8 +320,10 @@ def main():
     if args.jobs == 1:
         # Secuencial — más fácil de leer el output
         for i, combo in enumerate(combos, 1):
-            if combo["RAND"] == 1 and combo["COOCKED"] == 1:
+            if combo["MIN_LEAF_SIZE"] >= combo["LEAF_SIZE"]:
                 continue
+            # if combo["RAND"] == 1 and combo["COOCKED"] == 1:
+            #     continue
             r = run_experiment(i, combo, args.data, args.dry_run)
             results.append(r)
     else:
