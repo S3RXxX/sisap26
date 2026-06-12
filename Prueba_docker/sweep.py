@@ -42,6 +42,7 @@ PARAM_GRID = {
     # "MAX_DEGREE":    [32, 64, 96],
     # "ALPHA":         [1.2, 1.4],
     "RAND":          [0, 1],
+    "COOCKED":       [0,1],
     "SEED":          [42, 128, 5, 23, 47]
     # "LEAF_SIZE":   [256, 512],       # descomenta para añadir más dimensiones
     # "NUM_REPLICAS":[1, 2],
@@ -83,8 +84,9 @@ RESULTS_DIR  = "results"
 
 RE_BUILD_TIME  = re.compile(r"Build time\s*:\s*([\d.]+)\s*s")
 RE_AVG_DEG     = re.compile(r"Avg degree\s*:\s*([\d.]+)")
-RE_SECTION     = re.compile(r"──\s*(allknn|itest|otest)\s*\((\d+) queries")
+RE_SECTION     = re.compile(r"[--]\s*(allknn|itest|otest)\s*\((\d+) queries")
 RE_RESULT_ROW  = re.compile(r"^\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s*$")
+RE_MAX_DEPTH = re.compile(r"[Mm]ax.?depth\s*[:\s]\s*(\d+)")
 
 
 def parse_output(text: str) -> dict:
@@ -105,11 +107,13 @@ def parse_output(text: str) -> dict:
     m = RE_AVG_DEG.search(text)
     result["avg_degree"] = float(m.group(1)) if m else None
 
+    m = RE_MAX_DEPTH.search(text)
+    result["max_depth"] = float(m.group(1)) if m else None
+
     for line in text.splitlines():
         ms = RE_SECTION.search(line)
         if ms:
             current_section = ms.group(1)   # allknn | itest | otest
-            continue
 
         mr = RE_RESULT_ROW.match(line)
         if mr and current_section:
@@ -192,7 +196,8 @@ def run_experiment(exp_id: int, params: dict, data_dir: str, dry_run: bool) -> d
             qps = metrics.get(f"{section}_bw{bw}_qps")
             if rec is not None:
                 print(f"    {section:8s}  recall={rec:.4f}  qps={qps:.0f}")
-
+        if metrics.get("max_depth") is not None:
+            print(f"    max_depth = {metrics['max_depth']}")
         if metrics.get("build_time_s"):
             print(f"    build={metrics['build_time_s']:.1f}s  "
                   f"wall={wall_s:.1f}s")
@@ -312,6 +317,8 @@ def main():
     if args.jobs == 1:
         # Secuencial — más fácil de leer el output
         for i, combo in enumerate(combos, 1):
+            if combo["RAND"] == 1 and combo["COOCKED"] == 1:
+                continue
             r = run_experiment(i, combo, args.data, args.dry_run)
             results.append(r)
     else:

@@ -109,6 +109,8 @@ ENV BACK_EDGE=1
 ENV SEED=42
 # Randomness
 ENV RAND=0
+# COOCKED
+ENV COOCKED=0
 
 # Runtime / system
 # OMP threads for build+query (0 = all available cores)
