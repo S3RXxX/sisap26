@@ -262,7 +262,7 @@ def main():
     try:
         with open(cfg_local) as f:
             cfg_json = json.load(f)
-        k    = cfg_json["k"]
+        k    = cfg_json["k"] + 1
         gt_I = cfg_json["gt_I"]
         train_data = cfg_json["data"] # name of the training data
         log(f"  config.json : k={k}  gt_I={gt_I}")

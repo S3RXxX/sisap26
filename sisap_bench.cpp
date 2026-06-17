@@ -317,7 +317,7 @@ static void run_split(const char* label,
         double total_s    = 0.0;
         std::vector<pipnn::id_t> ids;
         std::vector<float>       scores;
-
+        
         for (int q0 = 0; q0 < nq; q0 += chunk) {
             int bn = std::min(chunk, nq - q0);
             auto t = clk::now();
