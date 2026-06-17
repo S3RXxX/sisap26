@@ -1,7 +1,0 @@
-numpy
-scipy
-h5py
-tqdm
-faiss-cpu
-matplotlib
-pandas

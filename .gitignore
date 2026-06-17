@@ -209,4 +209,7 @@ __marimo__/
 # Cositas
 data_paths.txt
 data/
+results/
+images/
 read_h5
+prueba.py
