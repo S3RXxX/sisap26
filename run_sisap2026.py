@@ -187,17 +187,19 @@ def bin_path(work: str, name: str, precision: str) -> str:
 def main():
     ap = argparse.ArgumentParser(description="SISAP 2026 PiPNN benchmark",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--input",       default="/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
+    ap.add_argument("--input",       default=None,
                     help="dataset path")
-    ap.add_argument("--task_description",       default="/data/sisap_work/wikipedia-small/config.json",
+    ap.add_argument("--output",       default=None,
+                    help="output path")
+    ap.add_argument("--task-description",       default=None,
                     help="config path")
     ap.add_argument("--precision",     default="int8",
                     choices=["float32", "float16", "int8"],
                     help="Vector storage precision (auto-detected by C++ from file size)")
     ap.add_argument("--bw",            type=int, default=256,
                     help="Query beam width")
-    ap.add_argument("--output",          default="sisap_work",
-                    help="output directory")
+    ap.add_argument("--work",          default="sisap_work",
+                    help="work directory")
     ap.add_argument("--allknn-sample", type=int, default=0,
                     metavar="N",
                     help="Vectors sampled from train for allknn recall "
@@ -238,13 +240,12 @@ def main():
     
     args = ap.parse_args()
     prepro_time = time.time()
-
     with open("config_pipnn.json") as f:
         pipnn_json = json.load(f)
-    args.input = "/app/" + pipnn_json["input"]
-    args.task_description = "/app/" + pipnn_json["task_description"]
+    args.input = pipnn_json["input"]
+    args.task_description = pipnn_json["task_description"]
     # ds   = DATASETS[args.dataset]
-    prec, work = args.precision, args.output
+    prec, work = args.precision, args.work
     os.makedirs(work, exist_ok=True)
     # Starts data loading/preprocessing
     # ── Download ──────────────────────────────────────────────────────────
@@ -355,7 +356,8 @@ def main():
         str(args.hash_bits), str(args.reservoir_cap),
         str(args.num_replicas), str(args.final_prune),
         str(args.back_edge), str(args.num_threads),
-        str(args.seed), str(args.randomness), str(args.coocked)
+        str(args.seed), str(args.randomness), str(args.coocked),
+        str(args.output)
     ]
     if args.save_index:
         cmd += ["--save-index", args.save_index]
