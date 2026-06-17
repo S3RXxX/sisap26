@@ -240,10 +240,10 @@ def main():
     
     args = ap.parse_args()
     prepro_time = time.time()
-    with open("config_pipnn.json") as f:
-        pipnn_json = json.load(f)
-    args.input = pipnn_json["input"]
-    args.task_description = pipnn_json["task_description"]
+    # with open("config_pipnn.json") as f:
+    #     pipnn_json = json.load(f)
+    # args.input = pipnn_json["input"]
+    # args.task_description = pipnn_json["task_description"]
     # ds   = DATASETS[args.dataset]
     prec, work = args.precision, args.work
     os.makedirs(work, exist_ok=True)
