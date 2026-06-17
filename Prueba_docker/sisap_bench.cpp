@@ -206,7 +206,7 @@ static std::vector<int> read_gt(const std::string& path, int& N, int& K){
 void resultH5(std::vector<pipnn::id_t> knns, std::vector<float> dists, int k, int n,
      double buildT, double preproT, double queryT,  pipnn::Config cfg)
 {
-    H5::H5File file("/data/results/task1/my_result.h5", H5F_ACC_TRUNC);
+    H5::H5File file("/app/results/task1/pipnn_results.h5", H5F_ACC_TRUNC);
 
     // Dataset dimensions
     hsize_t dims[2] = {static_cast<hsize_t>(n),
@@ -305,7 +305,7 @@ static void run_split(const char* label,
                       const std::vector<int>& gt, int gt_k,
                       int k, const std::vector<int>& bws,
                       double preproT, double buildT, pipnn::Config cfg,
-                      int chunk = 20000) {
+                      int chunk = 10000) {
     printf("\n-- %s (%d queries, recall@%d) ----\n",label,nq,k);
     printf("  %-6s  recall@%-2d  QPS\n", "bw", k);
 
@@ -328,10 +328,13 @@ static void run_split(const char* label,
                 const int*         g = gt.data()  + (size_t)(q0 + qi) * gt_k;
                 for (int i = 0; i < k; ++i)
                     for (int j = 0; j < k; ++j)   // only top-k GT entries
-                        if ((int)r[i] == g[j]) { ++total_hits; break; }
+                        if ((int)r[i] + 1 == g[j]) { ++total_hits; break; }
             }
         }
-
+        for (int i; i < k*chunk; i++)
+        {
+            ids[i]++;
+        }
         double rec = (double)total_hits / (double)((long long)nq * k);
         printf("  %-6d  %.4f     %.0f\n", bw, rec, nq / total_s);
         resultH5(ids, scores, k, chunk, buildT, preproT, total_s,  cfg);
@@ -429,7 +432,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<int> bws = {BW};
-    run_split("allknn", idx, allq.data.data(), allq.n, D, allgt, Kallgt, K, bws, Prepro_time, build_s, cfg, Nt);
+    run_split("allknn", idx, allq.data.data(), allq.n, D, allgt, Kallgt, K, bws, Prepro_time, build_s, cfg);
     printf("\nDone.\n");
     return 0;
 }

@@ -74,12 +74,13 @@ WORKDIR /app
 COPY pipnn_dot.hpp     .
 COPY sisap_bench.cpp   .
 COPY run_sisap2026.py  .
+COPY config_pipnn.json  .
 
 # ── Default hyperparameters ───────────────────────────────────────────────────
 # Query / retrieval
 
 # Beam width during graph search (higher = better recall, slower)
-ENV BEAM_WIDTH=256        
+ENV BEAM_WIDTH=32        
 
 # Graph build parameters (passed via sisap_bench / make_config overrides)
 # Max out-degree per node (R). Higher → better recall, more memory
@@ -101,9 +102,9 @@ ENV RESERVOIR_CAP=128
 # Independent RBC graph replications (increases build time)
 ENV NUM_REPLICAS=1
 # Apply RobustPrune after HashPrune (0/1)
-ENV FINAL_PRUNE=1
+ENV FINAL_PRUNE=0
 # Run back-edge consolidation pass (0/1)
-ENV BACK_EDGE=1
+ENV BACK_EDGE=0
 # Random seed for reproducibility
 ENV SEED=42
 # Randomness
@@ -111,12 +112,12 @@ ENV RAND=0
 # COOCKED
 ENV COOCKED=0
 #PRECISION
-ENV PRECISION='float16'
+ENV PRECISION='int8'
 
 #Input
-ENV INPUT='/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5'
-#Config
-ENV CONF='/data/sisap_work/wikipedia-small/config.json'
+# ENV INPUT='/app/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5'
+# #Config
+# ENV CONF='/data/sisap_work/wikipedia-small/config.json'
 
 # Runtime / system
 # OMP threads for build+query (0 = all available cores)

@@ -50,25 +50,23 @@ if [ "${OMP_NUM_THREADS}" != "0" ]; then
 fi
 
 # ── Launch benchmark ──────────────────────────────────────────────────────────
-exec python3 /app/run_sisap2026.py \
-    --output    "${WORK_DIR}"      \
-    --bw      "${BEAM_WIDTH}"    \
-    --max_degree     "${MAX_DEGREE}"     \
-    --alpha          "${ALPHA}"          \
-    --leaf_size      "${LEAF_SIZE}"      \
-    --min_leaf_size  "${MIN_LEAF_SIZE}"  \
-    --k_entry        "${K_ENTRY}"        \
-    --entry_sample   "${ENTRY_SAMPLE}"   \
-    --hash_bits      "${HASH_BITS}"      \
-    --reservoir_cap  "${RESERVOIR_CAP}"  \
-    --num_replicas   "${NUM_REPLICAS}"   \
-    --final_prune    "${FINAL_PRUNE}"    \
-    --back_edge      "${BACK_EDGE}"      \
-    --num_threads    "${NUM_THREADS}"    \
-    --seed           "${SEED}"           \
-    --randomness     "${RAND}"           \
-    --coocked        "${COOCKED}"         \
-    --input        "${INPUT}"   \
-    --task_description "${CONF}"\
-    --precision "${PRECISION}"
-    "$@"   # any extra args passed directly to docker run are forwarded here
+# exec python3 /app/run_sisap2026.py \
+#     --output    "${WORK_DIR}"      \
+#     --bw      "${BEAM_WIDTH}"    \
+#     --max_degree     "${MAX_DEGREE}"     \
+#     --alpha          "${ALPHA}"          \
+#     --leaf_size      "${LEAF_SIZE}"      \
+#     --min_leaf_size  "${MIN_LEAF_SIZE}"  \
+#     --k_entry        "${K_ENTRY}"        \
+#     --entry_sample   "${ENTRY_SAMPLE}"   \
+#     --hash_bits      "${HASH_BITS}"      \
+#     --reservoir_cap  "${RESERVOIR_CAP}"  \
+#     --num_replicas   "${NUM_REPLICAS}"   \
+#     --final_prune    "${FINAL_PRUNE}"    \
+#     --back_edge      "${BACK_EDGE}"      \
+#     --num_threads    "${NUM_THREADS}"    \
+#     --seed           "${SEED}"           \
+#     --randomness     "${RAND}"           \
+#     --coocked        "${COOCKED}"         \
+#     --precision "${PRECISION}"
+#     "$@"   # any extra args passed directly to docker run are forwarded here

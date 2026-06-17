@@ -191,7 +191,7 @@ def main():
                     help="dataset path")
     ap.add_argument("--task_description",       default="/data/sisap_work/wikipedia-small/config.json",
                     help="config path")
-    ap.add_argument("--precision",     default="float16",
+    ap.add_argument("--precision",     default="int8",
                     choices=["float32", "float16", "int8"],
                     help="Vector storage precision (auto-detected by C++ from file size)")
     ap.add_argument("--bw",            type=int, default=256,
@@ -235,8 +235,14 @@ def main():
                         help="OMP threads (0 = all available)")
     ap.add_argument("--seed",          type=int,   default=42,
                         help="Random seed")
+    
     args = ap.parse_args()
     prepro_time = time.time()
+
+    with open("config_pipnn.json") as f:
+        pipnn_json = json.load(f)
+    args.input = "/app/" + pipnn_json["input"]
+    args.task_description = "/app/" + pipnn_json["task_description"]
     # ds   = DATASETS[args.dataset]
     prec, work = args.precision, args.output
     os.makedirs(work, exist_ok=True)
@@ -300,9 +306,9 @@ def main():
         for part in gt_I:
             node = node[part]
         allknn_gt_raw = node[:].astype(np.int32)
-        if allknn_gt_raw.min() > 0:
-            log("  1-based -> 0-based")
-            allknn_gt_raw -= 1
+        # if allknn_gt_raw.min() > 0:
+        #     log("  1-based -> 0-based")
+        #     allknn_gt_raw -= 1
 
         # ── allknn queries: sample or full ────────────────────────────
         sample_n = args.allknn_sample
@@ -357,6 +363,11 @@ def main():
         cmd += ["--load-index", args.load_index]
 
     subprocess.check_call(cmd)
+    for f in os.listdir(work):
+        if f.endswith(".bin"):
+            fpath = os.path.join(work, f)
+            os.remove(fpath)
+            log(f"  eliminado: {fpath}")
 
 
 if __name__ == "__main__":
