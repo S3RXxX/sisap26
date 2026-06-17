@@ -45,44 +45,52 @@ except ImportError:
     HF_HUB = False
 
 # ── Dataset registry ──────────────────────────────────────────────────────────
-DATASETS = {
-    "wikipedia-small": {
-        "dir":  "wikipedia-small",
-        "file": "benchmark-dev-wikipedia-bge-m3-small.h5",
-        "size_mb": 682,
-    },
-    "wikipedia": {
-        "dir":  "wikipedia",
-        "file": "benchmark-dev-wikipedia-bge-m3.h5",
-        "size_mb": 14_900,
-    },
-}
+# DATASETS = {
+#     "wikipedia-small": {
+#         "dir":  "wikipedia-small",
+#         "file": "benchmark-dev-wikipedia-bge-m3-small.h5",
+#         "size_mb": 682,
+#     },
+#     "wikipedia": {
+#         "dir":  "wikipedia",
+#         "file": "benchmark-dev-wikipedia-bge-m3.h5",
+#         "size_mb": 14_900,
+#     },
+# }
 REPO_ID   = "SISAP-Challenges/SISAP2026"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CHUNK = 100_000   # rows per I/O chunk
 
+# ── Memory estimate table ─────────────────────────────────────────────────────
+PREC_BYTES = {"float32": 4, "float16": 2, "int8": 1}
+PREC_SUFFIX = {"float32": "_f32", "float16": "_f16", "int8": "_i8"}
 # ── Logging ───────────────────────────────────────────────────────────────────
 def log(msg, end="\n"):
     print(msg, end=end, flush=True)
 
 
 # ── Download ──────────────────────────────────────────────────────────────────
-def download(repo_id, hf_path, local_path):
-    if os.path.exists(local_path):
-        log(f"  {os.path.basename(local_path)} already present – skip.")
-        return
-    log(f"  Downloading {hf_path} ...")
-    t0 = time.time()
-    if HF_HUB:
-        cached = hf_hub_download(
-            repo_id=repo_id, filename=hf_path, repo_type="dataset",
-            local_dir=os.path.dirname(local_path) or ".")
-        if os.path.abspath(cached) != os.path.abspath(local_path):
-            shutil.copy2(cached, local_path)
-    else:
-        url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{hf_path}"
-        subprocess.check_call(["wget", "-q", "--show-progress", "-O", local_path, url])
-    log(f"  Done in {time.time()-t0:.0f}s  ({os.path.getsize(local_path)/1e6:.0f} MB)")
+# def download(repo_id, hf_path, local_path):
+#     if os.path.exists(local_path):
+#         log(f"  {os.path.basename(local_path)} already present – skip.")
+#         return
+#     log(f"  Downloading {hf_path} ...")
+#     t0 = time.time()
+#     if HF_HUB:
+#         cached = hf_hub_download(
+#             repo_id=repo_id, filename=hf_path, repo_type="dataset",
+#             local_dir=os.path.dirname(local_path) or ".")
+#         if os.path.abspath(cached) != os.path.abspath(local_path):
+#             shutil.copy2(cached, local_path)
+#     else:
+#         url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{hf_path}"
+#         subprocess.check_call(["wget", "-q", "--show-progress", "-O", local_path, url])
+#     log(f"  Done in {time.time()-t0:.0f}s  ({os.path.getsize(local_path)/1e6:.0f} MB)")
 
+def mem_estimate(n, d, precision):
+    vecs_gb = n * d * PREC_BYTES[precision] / 1e9
+    graph_gb = n * 64 * 4 / 1e9          # flat graph (max_degree=64, id_t=4B)
+    return vecs_gb, graph_gb
 
 # ── Normalisation + float16 conversion ────────────────────────────────────────
 def l2_norm_f16(v: np.ndarray) -> np.ndarray:
@@ -94,40 +102,57 @@ def l2_norm_f16(v: np.ndarray) -> np.ndarray:
 
 
 # ── Binary writers (float16 vectors, int32 ground truth) ──────────────────────
-CHUNK = 100_000   # rows per I/O chunk
 
-def write_vecs_f16(path, h5_dset):
-    """Stream h5_dset -> L2-normalised float16 binary with (N,D) header."""
+# ── Normalise + quantise ──────────────────────────────────────────────────────
+def to_precision(chunk_f32: np.ndarray, precision: str) -> np.ndarray:
+    """L2-normalise rows then convert to the requested precision."""
+    v = chunk_f32.astype(np.float32, copy=False)
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    v /= np.where(n == 0, 1.0, n)
+    if precision == "float32":
+        return v
+    if precision == "float16":
+        return v.astype(np.float16)
+    # int8: round(v * 127), clipped to [-127, 127]
+    return np.clip(np.round(v * 127.0), -127, 127).astype(np.int8)
+
+# ── Binary writers ────────────────────────────────────────────────────────────
+def write_vecs(path: str, h5_dset, precision: str):
+    """Stream h5_dset -> L2-normalised binary with (N,D) int32 header."""
     N, D = h5_dset.shape
+    nb = PREC_BYTES[precision]
     with open(path, "wb") as f:
         f.write(struct.pack("ii", N, D))
         for i in range(0, N, CHUNK):
-            chunk = l2_norm_f16(h5_dset[i:i+CHUNK])
-            f.write(chunk.tobytes())
+            raw = h5_dset[i:i+CHUNK]
+            f.write(to_precision(raw, precision).tobytes())
             log(f"\r    {min(i+CHUNK, N):>10,}/{N:,}", end="")
-    size_mb = (8 + N * D * 2) / 1e6
-    log(f"\r    wrote {path}  [{N:,} x {D}]  ({size_mb:.1f} MB, float16)")
+    size_mb = (8 + N * D * nb) / 1e6
+    log(f"\r    wrote {path}  [{N:,} x {D}]  ({precision}, {size_mb:.1f} MB)")
 
 
-def write_vecs_f16_sample(path, h5_dset, indices: np.ndarray):
-    """Write the row-subset indices (assumed already sorted) of h5_dset as float16."""
+def write_vecs_sample(path: str, h5_dset, indices: np.ndarray, precision: str):
+    """Write a row-subset (indices must be sorted) as the given precision."""
     N, D = len(indices), h5_dset.shape[1]
+    nb = PREC_BYTES[precision]
     with open(path, "wb") as f:
         f.write(struct.pack("ii", N, D))
         for i in range(0, N, CHUNK):
-            rows = h5_dset[indices[i:i+CHUNK].tolist()]
-            f.write(l2_norm_f16(rows).tobytes())
+            idx_chunk = indices[i:i+CHUNK]
+            raw = h5_dset[idx_chunk.tolist()]
+            f.write(to_precision(raw, precision).tobytes())
             log(f"\r    {min(i+CHUNK, N):>8,}/{N:,}", end="")
-    log(f"\r    wrote {path}  [{N:,} x {D}] (sample, float16)")
+    size_mb = (8 + N * D * nb) / 1e6
+    log(f"\r    wrote {path}  [{N:,} x {D}] (sample, {precision}, {size_mb:.1f} MB)")
 
 
-def write_gt(path, arr: np.ndarray):
+def write_gt(path: str, arr: np.ndarray):
     """Write int32 ground-truth with (N,K) header."""
     N, K = arr.shape
     with open(path, "wb") as f:
         f.write(struct.pack("ii", N, K))
         f.write(arr.astype(np.int32).tobytes())
-    log(f"    wrote {path}  [{N:,} x {K}]")
+    log(f"    wrote {path}  [{N:,} x {K}]  (int32)")
 
 
 # ── HDF5 tree ─────────────────────────────────────────────────────────────────
@@ -152,25 +177,36 @@ def compile_binary(src_cpp, out_bin, include_dir):
         log(f"  {out_bin} is up to date.")
         return
     log(f"  Compiling {os.path.basename(src_cpp)} ...")
-    cmd = ["g++", "-O3", "-std=c++17", "-fopenmp", "-march=native",
-           f"-I{include_dir}", src_cpp, "-o", out_bin]
+    
+    cmd = ["g++", "-O3", "-std=c++17", "-fopenmp", 
+           f"-I{include_dir}", src_cpp,"-I/usr/include/hdf5/serial",
+            "-L/usr/lib/x86_64-linux-gnu/hdf5/serial",
+            "-lhdf5_cpp",
+            "-lhdf5", "-march=native", "-o", out_bin]
+
     log("  " + " ".join(cmd))
     subprocess.check_call(cmd)
     log("  OK")
 
+def bin_path(work: str, name: str, precision: str) -> str:
+    """Return precision-stamped binary filename, e.g. sisap_work/train_f16.bin"""
+    return os.path.join(work, name + PREC_SUFFIX[precision] + ".bin")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset",       default="wikipedia-small",
-                    choices=list(DATASETS))
-    ap.add_argument("--h5",            default=None,
-                    help="Override local HDF5 path")
-    ap.add_argument("--k",             type=int, default=None)
+    ap.add_argument("--input",       default="/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
+                    help="dataset path")
+    ap.add_argument("--task_description",       default="/data/sisap_work/wikipedia-small/config.json",
+                    help="config path")
+    ap.add_argument("--precision",     default="float16",
+                    choices=["float32", "float16", "int8"],
+                    help="Vector storage precision (auto-detected by C++ from file size)")
     ap.add_argument("--bw",            type=int, default=256,
                     help="Query beam width")
-    ap.add_argument("--work",          default="sisap_work")
-    ap.add_argument("--allknn-sample", type=int, default=50_000,
+    ap.add_argument("--output",          default="sisap_work",
+                    help="output directory")
+    ap.add_argument("--allknn-sample", type=int, default=0,
                     metavar="N",
                     help="Vectors sampled from train for allknn recall "
                          "(0 = full run, can take hours for wikipedia)")
@@ -208,35 +244,32 @@ def main():
     ap.add_argument("--seed",          type=int,   default=42,
                         help="Random seed")
     args = ap.parse_args()
-
-    ds   = DATASETS[args.dataset]
-    work = args.work
+    prepro_time = time.time()
+    # ds   = DATASETS[args.dataset]
+    prec, work = args.precision, args.output
     os.makedirs(work, exist_ok=True)
-
+    # Starts data loading/preprocessing
     # ── Download ──────────────────────────────────────────────────────────
     log("=" * 62)
-    log(f"Dataset : {args.dataset}  (~{ds['size_mb']:,} MB HDF5)")
+    log(f"Dataset : {args.input}")
+    log(f"Precision : {prec}  ({PREC_BYTES[prec]} byte/element)")
     log("=" * 62)
 
-    h5_local = args.h5 or os.path.join(work, ds["file"])
-    hf_h5    = f"{ds['dir']}/{ds['file']}"
-    download(REPO_ID, hf_h5, h5_local)
-
-    hf_cfg   = f"{ds['dir']}/config.json"
-    cfg_local = os.path.join(work, f"config_{args.dataset}.json")
+    h5_local = args.input
+    # hf_h5    = f"{ds['dir']}/{ds['file']}"
+    # download(REPO_ID, hf_h5, h5_local) # Hacer algo que lo descarge desde fuera
+    # cfg_local = os.path.join(work, f"config_{args.dataset}.json")
+    cfg_local = args.task_description
     try:
-        download(REPO_ID, hf_cfg, cfg_local)
         with open(cfg_local) as f:
             cfg_json = json.load(f)
-        k    = cfg_json.get("k", 15)
-        gt_I = cfg_json.get("gt_I", ["allknn", "knns"])
+        k    = cfg_json["k"]
+        gt_I = cfg_json["gt_I"]
+        train_data = cfg_json["data"] # name of the training data
         log(f"  config.json : k={k}  gt_I={gt_I}")
-    except Exception as e:
-        log(f"  Warning: config.json unavailable ({e}). Using k=15.")
-        k, gt_I = 15, ["allknn", "knns"]
-
-    if args.k:
-        k = args.k
+    except:
+        log(f"  Couldn't find config file {cfg_local}")
+        exit()
 
     # ── HDF5 inspection & streaming export (float16) ──────────────────────
     log("\n" + "=" * 62)
@@ -252,22 +285,20 @@ def main():
     train_bin    = os.path.join(work, "train_f16.bin")
     allknn_q_bin = os.path.join(work, "allknn_q_f16.bin")
     allknn_gt_bin= os.path.join(work, "allknn_gt.bin")
-    iq_bin       = os.path.join(work, "itest_q_f16.bin")
-    igt_bin      = os.path.join(work, "itest_gt.bin")
-    oq_bin       = os.path.join(work, "otest_q_f16.bin")
-    ogt_bin      = os.path.join(work, "otest_gt.bin")
 
     with h5py.File(h5_local, "r") as h5:
         h5_tree(h5)
         log("")
 
         # ── train ──────────────────────────────────────────────────────
-        Nt, D = h5["train"].shape
+        Nt, D = h5[train_data].shape
+        v_gb, g_gb = mem_estimate(Nt, D, prec)
         log(f"train : {Nt:,} x {D}")
-        log(f"  float32: {Nt*D*4/1e9:.2f} GB   float16: {Nt*D*2/1e9:.2f} GB")
+        log(f"  RAM estimate: {v_gb:.2f} GB vectors + {g_gb:.2f} GB graph"
+            f"  = {v_gb+g_gb:.2f} GB total")
         if not os.path.exists(train_bin):
-            log("  exporting train_f16.bin ...")
-            write_vecs_f16(train_bin, h5["train"])
+            log(f"  exporting {os.path.basename(train_bin)} ...")
+            write_vecs(train_bin, h5["train"], prec)
         else:
             log(f"  {train_bin} cached.")
 
@@ -287,38 +318,16 @@ def main():
         if sample_n == 0 or sample_n >= Nt:
             log(f"  allknn: full run ({Nt:,} queries)")
             if not os.path.exists(allknn_q_bin):
-                write_vecs_f16(allknn_q_bin, h5["train"])
-            write_gt(allknn_gt_bin, allknn_0)
+                write_vecs(allknn_q_bin, h5["train"], prec)
+            write_gt(allknn_gt_bin, allknn_gt_raw)
         else:
+            # Sort indices so query file and GT rows are in the same order
             rng = np.random.default_rng(42)
             idx = np.sort(rng.choice(Nt, size=sample_n, replace=False))
             log(f"  allknn: sample {sample_n:,}/{Nt:,} train vectors")
             if not os.path.exists(allknn_q_bin):
-                write_vecs_f16_sample(allknn_q_bin, h5["train"], idx)
-            write_gt(allknn_gt_bin, allknn_0[idx])
-
-        # ── itest ─────────────────────────────────────────────────────
-        log("\nitest ...")
-        if not os.path.exists(iq_bin):
-            write_vecs_f16(iq_bin, h5["itest"]["queries"])
-        else:
-            log(f"  {iq_bin} cached.")
-        igt_raw = h5["itest"]["knns"][:].astype(np.int32)
-        if igt_raw.min() > 0:
-            igt_raw -= 1
-        write_gt(igt_bin, igt_raw)
-
-        # ── otest ─────────────────────────────────────────────────────
-        log("\notest ...")
-        if not os.path.exists(oq_bin):
-            write_vecs_f16(oq_bin, h5["otest"]["queries"])
-        else:
-            log(f"  {oq_bin} cached.")
-        ogt_raw = h5["otest"]["knns"][:].astype(np.int32)
-        if ogt_raw.min() > 0:
-            ogt_raw -= 1
-        write_gt(ogt_bin, ogt_raw)
-
+                write_vecs_sample(allknn_q_bin, h5["train"], idx, prec)
+            write_gt(allknn_gt_bin, allknn_gt_raw[idx])
     # ── Compile ───────────────────────────────────────────────────────────
     log("\n" + "=" * 62)
     log("Compile sisap_bench")
@@ -331,13 +340,18 @@ def main():
     log("\n" + "=" * 62)
     log(f"Benchmark  (k={k}  bw={args.bw})")
     log("=" * 62 + "\n")
+    args.randomness = 1
+    args.coocked = 0
+    args.back_edge = 1
+    args.final_prune = 1
+    args.num_replicas = 1
 
+    prepro_time = time.time() - prepro_time
     cmd = [
         bench_bin,
-        train_bin, allknn_q_bin, allknn_gt_bin,
-        iq_bin, igt_bin,
-        oq_bin, ogt_bin,
-        str(k), str(args.bw),
+        train_bin, allknn_q_bin, allknn_gt_bin, str(k),
+        str(prepro_time),
+         str(args.bw),
         str(args.max_degree), str(args.alpha),
         str(args.leaf_size), str(args.min_leaf_size),
         str(args.k_entry), str(args.entry_sample),

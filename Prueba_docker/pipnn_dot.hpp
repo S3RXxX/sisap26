@@ -107,32 +107,57 @@ inline void f16_to_f32(const uint16_t* __restrict__ s,
 #endif
 }
 
+inline void i8_to_f32(const int8_t* __restrict__ s,
+                       float*        __restrict__ d, int n) noexcept {
+#if PIPNN_AVX2
+    const __m256 scale = _mm256_set1_ps(1.0f / 127.0f);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        // Load 8 int8 into lower 64 bits, sign-extend to 8 x int32
+        __m128i a8  = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(s + i));
+        __m256i a32 = _mm256_cvtepi8_epi32(a8);
+        _mm256_storeu_ps(d + i, _mm256_mul_ps(_mm256_cvtepi32_ps(a32), scale));
+    }
+    for (; i < n; ++i) d[i] = (float)s[i] / 127.0f;
+#else
+    for (int i = 0; i < n; ++i) d[i] = (float)s[i] / 127.0f;
+#endif
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DataView – thin wrapper over float32 or float16 data.
 // ─────────────────────────────────────────────────────────────────────────────
 struct DataView {
     const float*    f32 = nullptr;
     const uint16_t* f16 = nullptr;
+    const int8_t*   i8  = nullptr;
     int dim = 0;
 
     DataView() = default;
-    DataView(const float*    p, int d) : f32(p), dim(d) {}
-    DataView(const uint16_t* p, int d) : f16(p), dim(d) {}
+    explicit DataView(const float*    p, int d) : f32(p), dim(d) {}
+    explicit DataView(const uint16_t* p, int d) : f16(p), dim(d) {}
+    explicit DataView(const int8_t*   p, int d) : i8(p),  dim(d) {}
 
+    // Convert row i into buf (or return direct pointer for f32)
+    const float* row(id_t i, float* buf) const {
+        if (f32) return f32 + (size_t)i * dim;
+        if (f16) { f16_to_f32(f16 + (size_t)i * dim, buf, dim); return buf; }
+        i8_to_f32 (i8  + (size_t)i * dim, buf, dim); return buf;
+    }
+
+    // Copy n indexed rows into a contiguous float32 buffer
     void pack(const id_t* rows, int n, float* dst) const {
-        if (f32) {
-            for (int i = 0; i < n; ++i)
+        for (int i = 0; i < n; ++i) {
+            if (f32)
                 std::memcpy(dst + (size_t)i*dim, f32 + (size_t)rows[i]*dim, dim*4);
-        } else {
-            for (int i = 0; i < n; ++i)
+            else if (f16)
                 f16_to_f32(f16 + (size_t)rows[i]*dim, dst + (size_t)i*dim, dim);
+            else
+                i8_to_f32 (i8  + (size_t)rows[i]*dim, dst + (size_t)i*dim, dim);
         }
     }
-    const float* row(id_t i, float* buf) const {
-        if (f32) return f32 + (size_t)i*dim;
-        f16_to_f32(f16 + (size_t)i*dim, buf, dim);
-        return buf;
-    }
+
+    // Single-row helpers using independent thread_local buffers A / B
     const float* row_a(id_t i) const {
         static thread_local std::vector<float> b;
         if ((int)b.size() < dim) b.resize(dim);
@@ -518,39 +543,35 @@ public:
         assert(cfg_.dim>0 && cfg_.hash_bits<=16);
     }
 
-    void build(const float* data, int n) {
-        build_impl(DataView(data, cfg_.dim), n);
-        data_   = data;
-        data16_ = nullptr;
-    }
-    void build_f16(const uint16_t* data, int n) {
-        build_impl(DataView(data, cfg_.dim), n);
-        data_   = nullptr;
-        data16_ = data;
-    }
+    // Build from any precision
+    void build    (const float*    d,int n){build_impl(DataView(d,cfg_.dim),n);data_=d;data16_=nullptr;data_i8_=nullptr;}
+    void build_f16(const uint16_t* d,int n){build_impl(DataView(d,cfg_.dim),n);data_=nullptr;data16_=d;data_i8_=nullptr;}
+    void build_i8 (const int8_t*   d,int n){build_impl(DataView(d,cfg_.dim),n);data_=nullptr;data16_=nullptr;data_i8_=d;}
 
-    void query(const float* queries, int nq, int k,
-               std::vector<id_t>& out_ids, std::vector<float>& out_scores,
-               int bw=0) const {
-        if(bw<=0) bw=cfg_.beam_width; bw=std::max(bw,k);
-        out_ids   .assign((size_t)nq*k, NO_ID);
-        out_scores.assign((size_t)nq*k, -INF_D);
+    // Set data pointer after load() without rebuilding
+    void set_data    (const float*    d){data_=d;   data16_=nullptr;data_i8_=nullptr;}
+    void set_data_f16(const uint16_t* d){data16_=d; data_=nullptr;  data_i8_=nullptr;}
+    void set_data_i8 (const int8_t*   d){data_i8_=d;data_=nullptr;  data16_=nullptr;}
+
+    void query(const float* queries,int nq,int k,
+               std::vector<id_t>& out_ids,std::vector<float>& out_scores,
+               int bw=0)const{
+        if(bw<=0)bw=cfg_.beam_width;bw=std::max(bw,k);
+        out_ids.assign((size_t)nq*k,NO_ID);out_scores.assign((size_t)nq*k,-INF_D);
 #pragma omp parallel for schedule(dynamic,1)
         for(int qi=0;qi<nq;++qi)
-            beam_search(queries+(size_t)qi*cfg_.dim, k, bw,
+            beam_search(queries+(size_t)qi*cfg_.dim,k,bw,
                         out_ids.data()+(size_t)qi*k,
                         out_scores.data()+(size_t)qi*k);
     }
 
-    static constexpr uint32_t MAGIC=0x544F4450u, VER=1u;
-    bool save(const std::string& p) const {
-        FILE* fp=std::fopen(p.c_str(),"wb"); if(!fp)return false;
+    static constexpr uint32_t MAGIC=0x544F4450u,VER=1u;
+    bool save(const std::string& p)const{
+        FILE*fp=std::fopen(p.c_str(),"wb");if(!fp)return false;
         auto w32=[&](uint32_t v){std::fwrite(&v,4,1,fp);};
         auto w16=[&](uint16_t v){std::fwrite(&v,2,1,fp);};
-        w32(MAGIC);w32(VER);
-        w32(n_);w32(cfg_.dim);w32(cfg_.max_degree);
-        w32((uint32_t)entries_.size());
-        for(id_t e:entries_) w32(e);
+        w32(MAGIC);w32(VER);w32(n_);w32(cfg_.dim);w32(cfg_.max_degree);
+        w32((uint32_t)entries_.size());for(id_t e:entries_)w32(e);
         for(int i=0;i<n_;++i){w16((uint16_t)g_.degree(i));
             std::fwrite(g_.row(i),4,g_.degree(i),fp);}
         std::fclose(fp);return true;
@@ -559,49 +580,45 @@ public:
         FILE*fp=std::fopen(p.c_str(),"rb");if(!fp)return false;
         auto r32=[&](uint32_t&v){return std::fread(&v,4,1,fp)==1;};
         auto r16=[&](uint16_t&v){return std::fread(&v,2,1,fp)==1;};
-        uint32_t mag,ver; r32(mag);r32(ver);
+        uint32_t mag,ver;r32(mag);r32(ver);
         if(mag!=MAGIC||ver!=VER){std::fclose(fp);return false;}
-        uint32_t n32,d32,R32,ne; r32(n32);r32(d32);r32(R32);r32(ne);
+        uint32_t n32,d32,R32,ne;r32(n32);r32(d32);r32(R32);r32(ne);
         n_=n32;cfg_.dim=d32;cfg_.max_degree=R32;
-        entries_.resize(ne);
-        for(auto&e:entries_){uint32_t v;r32(v);e=v;}
+        entries_.resize(ne);for(auto&e:entries_){uint32_t v;r32(v);e=v;}
         g_.init(n_,cfg_.max_degree);
-        for(int i=0;i<n_;++i){
-            uint16_t dg; r16(dg);
-            std::vector<id_t> nb(dg);
+        for(int i=0;i<n_;++i){uint16_t dg;r16(dg);
+            std::vector<id_t>nb(dg);
             if(dg){auto r=std::fread(nb.data(),4,dg,fp);(void)r;}
-            g_.set(i,nb);
-        }
+            g_.set(i,nb);}
         std::fclose(fp);return true;
     }
-    void set_data    (const float*    d){data_=d;   data16_=nullptr;}
-    void set_data_f16(const uint16_t* d){data16_=d; data_=nullptr;}
 
-    int num_points() const {return n_;}
-    const std::vector<id_t>& entry_points() const {return entries_;}
+    int num_points()const{return n_;}
+    const std::vector<id_t>& entry_points()const{return entries_;}
     struct Stats{double avg_deg,frac_bidir;};
-    Stats stats() const {
+    Stats stats()const{
         size_t tot=0,bi=0;
-        std::vector<std::unordered_set<id_t>> sets(n_);
-        for(int i=0;i<n_;++i) for(id_t v:g_.get(i)) sets[i].insert(v);
-        for(int u=0;u<n_;++u)
-            for(id_t v:g_.get(u)){++tot;if(sets[v].count(u))++bi;}
+        std::vector<std::unordered_set<id_t>>sets(n_);
+        for(int i=0;i<n_;++i)for(id_t v:g_.get(i))sets[i].insert(v);
+        for(int u=0;u<n_;++u)for(id_t v:g_.get(u)){++tot;if(sets[v].count(u))++bi;}
         return{(double)tot/n_,tot?(double)bi/tot:0.};
     }
 
 private:
-    Config            cfg_;
-    int               n_     = 0;
-    const float*      data_  = nullptr;
-    const uint16_t*   data16_= nullptr;
-    FlatGraph         g_;
-    LSHSketcher       lsh_;
-    std::vector<float>   sketches_;
-    std::vector<id_t>    entries_;
+    Config          cfg_;
+    int             n_     =0;
+    const float*    data_  =nullptr;
+    const uint16_t* data16_=nullptr;
+    const int8_t*   data_i8_=nullptr;
+    FlatGraph       g_;
+    LSHSketcher     lsh_;
+    std::vector<float>  sketches_;
+    std::vector<id_t>   entries_;
 
-    DataView active_dv() const {
-        return data16_ ? DataView(data16_, cfg_.dim)
-                       : DataView(data_,   cfg_.dim);
+    DataView active_dv()const{
+        if(data16_) return DataView(data16_,cfg_.dim);
+        if(data_i8_)return DataView(data_i8_,cfg_.dim);
+        return             DataView(data_,   cfg_.dim);
     }
 
     void build_impl(const DataView& dv, int n) {
@@ -735,9 +752,9 @@ private:
             const id_t*nbs=g_.row(c); int deg=g_.degree(c);
             for(int j=0;j<deg;++j){
                 if(j+1<deg){
-                    const void* pf = data16_
-                        ? (const void*)(data16_+(size_t)nbs[j+1]*cfg_.dim)
-                        : (const void*)(data_  +(size_t)nbs[j+1]*cfg_.dim);
+                    const void*pf=data16_?(const void*)(data16_+(size_t)nbs[j+1]*cfg_.dim)
+                                :data_i8_?(const void*)(data_i8_+(size_t)nbs[j+1]*cfg_.dim)
+                                         :(const void*)(data_   +(size_t)nbs[j+1]*cfg_.dim);
                     __builtin_prefetch(pf,0,1);
                 }
                 try_push(nbs[j]);

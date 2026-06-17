@@ -25,6 +25,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <H5Cpp.h>
+#include <sstream>
 
 #ifndef _WIN32
 #  include <fcntl.h>
@@ -40,112 +42,271 @@ static double sec(clk::time_point t) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Precision enum (detected from file size)
+// ─────────────────────────────────────────────────────────────────────────────
+enum class DType { F32, F16, I8 };
+static const char* dtype_name(DType dt){
+    return dt==DType::F32?"float32":dt==DType::F16?"float16":"int8";}
+static int dtype_bytes(DType dt){
+    return dt==DType::F32?4:dt==DType::F16?2:1;}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Detect precision from file size
+// ─────────────────────────────────────────────────────────────────────────────
+static DType detect_dtype(const std::string& path, int n, int d){
+    FILE* f = std::fopen(path.c_str(),"rb");
+    if (!f) throw std::runtime_error("Cannot open: "+path);
+    std::fseek(f, 0, SEEK_END);
+    long fsize = std::ftell(f);
+    std::fclose(f);
+
+    long data_bytes = fsize - 8;
+    long nd = (long)n * d;
+    if (data_bytes == nd*4) return DType::F32;
+    if (data_bytes == nd*2) return DType::F16;
+    if (data_bytes == nd*1) return DType::I8;
+    throw std::runtime_error(
+        "Cannot detect dtype for "+path+
+        " (file="+std::to_string(fsize)+
+        " expected "+std::to_string(8+nd*4)+"/"+
+        std::to_string(8+nd*2)+"/"+std::to_string(8+nd)+")");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Memory-mapped float16 vector file
 // ─────────────────────────────────────────────────────────────────────────────
-struct MmapVecs16 {
-    int    n = 0, d = 0;
-    size_t map_size = 0;
-    void*  map_ptr  = nullptr;
-    int    fd_      = -1;
-    std::vector<uint16_t> buf_;  // fallback when mmap unavailable
+struct MmapVecs {
+    int              n=0, d=0;
+    DType            dtype=DType::F16;
+    size_t           map_size=0;
+    void*            map_ptr=nullptr;
+    int              fd_=-1;
+    std::vector<uint8_t> buf_;         // used when mmap is unavailable
+    const uint8_t*   data_ptr_=nullptr; // always the first data byte
 
-    void open(const std::string& path) {
-        FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) throw std::runtime_error("Cannot open: " + path);
-        std::fread(&n, 4, 1, f);
-        std::fread(&d, 4, 1, f);
+    void open(const std::string& path){
+        // ── Read header ───────────────────────────────────────────────
+        FILE* f = std::fopen(path.c_str(),"rb");
+        if (!f) throw std::runtime_error("Cannot open: "+path);
+        std::fread(&n,4,1,f);
+        std::fread(&d,4,1,f);
         std::fclose(f);
 
-        map_size = 8 + (size_t)n * d * sizeof(uint16_t);
+        dtype             = detect_dtype(path,n,d);
+        size_t data_size  = (size_t)n * d * dtype_bytes(dtype);
+        map_size          = 8 + data_size;
+
+        printf("  (%s) %.2f GB  (%d x %d)\n",
+               dtype_name(dtype), map_size/1e9, n, d);
 
 #ifdef HAVE_MMAP
         fd_ = ::open(path.c_str(), O_RDONLY);
-        if (fd_ >= 0) {
+        if (fd_ >= 0){
             map_ptr = ::mmap(nullptr, map_size, PROT_READ, MAP_SHARED, fd_, 0);
-            if (map_ptr == MAP_FAILED) {
-                map_ptr = nullptr; ::close(fd_); fd_ = -1;
-            } else {
+            if (map_ptr != MAP_FAILED){
                 ::madvise(map_ptr, map_size, MADV_WILLNEED);
-                printf("  mmap (f16): %.2f GB  (%d x %d)\n",
-                       map_size / 1e9, n, d);
+                // data starts after the 8-byte header; set once here
+                data_ptr_ = static_cast<const uint8_t*>(map_ptr) + 8;
                 return;
             }
+            map_ptr = nullptr;
+            ::close(fd_); fd_ = -1;
         }
 #endif
-        printf("  loading into RAM (f16): %.2f GB  (%d x %d)\n",
-               map_size / 1e9, n, d);
-        FILE* f2 = std::fopen(path.c_str(), "rb");
+        // ── RAM fallback: read data bytes only (skip header) ──────────
+        printf("  (mmap unavailable, reading into RAM)\n");
+        buf_.resize(data_size);
+        FILE* f2 = std::fopen(path.c_str(),"rb");
         std::fseek(f2, 8, SEEK_SET);
-        buf_.resize((size_t)n * d);
-        std::fread(buf_.data(), sizeof(uint16_t), (size_t)n * d, f2);
+        std::fread(buf_.data(), 1, data_size, f2);
         std::fclose(f2);
+        data_ptr_ = buf_.data();
     }
 
-    const uint16_t* data() const {
-        if (map_ptr)
-            return reinterpret_cast<const uint16_t*>(
-                       static_cast<const char*>(map_ptr) + 8);
-        return buf_.data();
+    // First data byte, correctly set by open() regardless of path taken
+    const void* raw() const { return data_ptr_; }
+
+    void build_index(pipnn::IndexDot& idx) const {
+        switch(dtype){
+        case DType::F32: idx.build    (static_cast<const float*   >(raw()),n); break;
+        case DType::F16: idx.build_f16(static_cast<const uint16_t*>(raw()),n); break;
+        case DType::I8:  idx.build_i8 (static_cast<const int8_t*  >(raw()),n); break;
+        }
     }
 
-    ~MmapVecs16() {
+    void set_data(pipnn::IndexDot& idx) const {
+        switch(dtype){
+        case DType::F32: idx.set_data    (static_cast<const float*   >(raw())); break;
+        case DType::F16: idx.set_data_f16(static_cast<const uint16_t*>(raw())); break;
+        case DType::I8:  idx.set_data_i8 (static_cast<const int8_t*  >(raw())); break;
+        }
+    }
+
+    ~MmapVecs(){
 #ifdef HAVE_MMAP
-        if (map_ptr && map_ptr != MAP_FAILED) ::munmap(map_ptr, map_size);
+        if (map_ptr && map_ptr!=MAP_FAILED) ::munmap(map_ptr, map_size);
         if (fd_ >= 0) ::close(fd_);
 #endif
     }
-    MmapVecs16() = default;
-    MmapVecs16(const MmapVecs16&) = delete;
-    MmapVecs16& operator=(const MmapVecs16&) = delete;
+    MmapVecs()=default;
+    MmapVecs(const MmapVecs&)=delete;
+    MmapVecs& operator=(const MmapVecs&)=delete;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query vectors – small enough to load fully and convert to float32 once
 // ─────────────────────────────────────────────────────────────────────────────
 struct QueryVecs {
-    int n = 0, d = 0;
-    std::vector<float> data;  // converted to float32 for the query() API
+    int n=0, d=0;
+    std::vector<float> data;
 
-    void open(const std::string& path) {
-        FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) throw std::runtime_error("Cannot open: " + path);
-        std::fread(&n, 4, 1, f);
-        std::fread(&d, 4, 1, f);
-        std::vector<uint16_t> raw((size_t)n * d);
-        std::fread(raw.data(), sizeof(uint16_t), (size_t)n * d, f);
+    void open(const std::string& path){
+        FILE* f = std::fopen(path.c_str(),"rb");
+        if (!f) throw std::runtime_error("Cannot open: "+path);
+        std::fread(&n,4,1,f); std::fread(&d,4,1,f);
+
+        DType dt = detect_dtype(path,n,d);
+        size_t elems = (size_t)n * d;
+        data.resize(elems);
+
+        if (dt == DType::F32){
+            std::fread(data.data(), 4, elems, f);
+        } else if (dt == DType::F16){
+            std::vector<uint16_t> raw(elems);
+            std::fread(raw.data(), 2, elems, f);
+            pipnn::f16_to_f32(raw.data(), data.data(), (int)elems);
+        } else {
+            std::vector<int8_t> raw(elems);
+            std::fread(raw.data(), 1, elems, f);
+            pipnn::i8_to_f32(raw.data(), data.data(), (int)elems);
+        }
         std::fclose(f);
-
-        data.resize((size_t)n * d);
-        pipnn::f16_to_f32(raw.data(), data.data(), n * d);
-        printf("  loaded (f16->f32): %.2f MB  (%d x %d)\n",
-               data.size()*4/1e6, n, d);
+        printf("  (%s -> f32) %.1f MB  (%d x %d)\n",
+               dtype_name(dt), elems*4/1e6, n, d);
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Ground-truth loader
 // ─────────────────────────────────────────────────────────────────────────────
-static std::vector<int> read_gt(const std::string& path, int& N, int& K) {
+static std::vector<int> read_gt(const std::string& path, int& N, int& K){
     std::ifstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("Cannot open GT: " + path);
-    f.read(reinterpret_cast<char*>(&N), 4);
-    f.read(reinterpret_cast<char*>(&K), 4);
-    std::vector<int> g((size_t)N * K);
-    f.read(reinterpret_cast<char*>(g.data()), (size_t)N * K * 4);
+    if (!f) throw std::runtime_error("Cannot open GT: "+path);
+    f.read(reinterpret_cast<char*>(&N),4);
+    f.read(reinterpret_cast<char*>(&K),4);
+    std::vector<int> g((size_t)N*K);
+    f.read(reinterpret_cast<char*>(g.data()),(size_t)N*K*4);
     return g;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chunked query + recall@k  (only checks against the top-k GT entries)
 // ─────────────────────────────────────────────────────────────────────────────
+
+void resultH5(std::vector<pipnn::id_t> knns, std::vector<float> dists, int k, int n,
+     double buildT, double preproT, double queryT,  pipnn::Config cfg)
+{
+    H5::H5File file("/data/results/task1/my_result.h5", H5F_ACC_TRUNC);
+
+    // Dataset dimensions
+    hsize_t dims[2] = {static_cast<hsize_t>(n),
+                       static_cast<hsize_t>(k)};
+
+    H5::DataSpace dataspace(2, dims);
+
+    // Create knns dataset
+    H5::DataSet knnDataset =
+        file.createDataSet("knns",
+                           H5::PredType::NATIVE_INT,
+                           dataspace);
+
+    knnDataset.write(knns.data(), H5::PredType::NATIVE_INT);
+
+    // Create dists dataset
+    H5::DataSet distDataset =
+        file.createDataSet("dists",
+                           H5::PredType::NATIVE_FLOAT,
+                           dataspace);
+
+    distDataset.write(dists.data(), H5::PredType::NATIVE_FLOAT);
+
+    // ---------- Attributes ----------
+
+    // String datatype
+    H5::StrType strdatatype(H5::PredType::C_S1, H5T_VARIABLE);
+    H5::DataSpace scalarSpace(H5S_SCALAR);
+
+    // algo
+    {
+        H5::Attribute attr = file.createAttribute(
+            "algo", strdatatype, scalarSpace);
+        std::string value = "PIPNN";
+        attr.write(strdatatype, value);
+    }
+
+    // task
+    {
+        H5::Attribute attr = file.createAttribute(
+            "task", strdatatype, scalarSpace);
+        std::string value = "task1";
+        attr.write(strdatatype, value);
+    }
+
+    // params
+    {
+        H5::Attribute attr = file.createAttribute(
+            "params", strdatatype, scalarSpace);
+
+        std::ostringstream oss;
+        oss << ",max_degree=" << cfg.max_degree
+            << ",alpha=" << cfg.alpha
+            << ",leaf_size=" << cfg.leaf_size
+            << ",min_leaf_size=" << cfg.min_leaf_size
+            << ",leader_frac=" << cfg.leader_frac
+            << ",max_leaders=" << cfg.max_leaders
+            << ",knn_k=" << cfg.knn_k
+            << ",hash_bits=" << cfg.hash_bits
+            << ",reservoir_cap=" << cfg.reservoir_cap
+            << ",k_entry=" << cfg.k_entry
+            << ",entry_sample=" << cfg.entry_sample
+            << ",beam_width=" << cfg.beam_width
+            << ",seed=" << cfg.seed;
+
+        std::string value = oss.str();
+        attr.write(strdatatype, value);
+    }
+
+    // buildtime
+    {
+        H5::Attribute attr = file.createAttribute(
+            "buildtime",
+            H5::PredType::NATIVE_DOUBLE,
+            scalarSpace);
+        double bpT = buildT + preproT;
+        attr.write(H5::PredType::NATIVE_DOUBLE, &bpT);
+    }
+
+    // querytime
+    {
+        H5::Attribute attr = file.createAttribute(
+            "querytime",
+            H5::PredType::NATIVE_DOUBLE,
+            scalarSpace);
+
+        attr.write(H5::PredType::NATIVE_DOUBLE, &queryT);
+    }
+
+    file.close();
+}
+
 static void run_split(const char* label,
                       pipnn::IndexDot& idx,
                       const float* queries, int nq, int D,
                       const std::vector<int>& gt, int gt_k,
                       int k, const std::vector<int>& bws,
+                      double preproT, double buildT, pipnn::Config cfg,
                       int chunk = 20000) {
-    printf("\n-- %s (%d queries, recall@%d) --------------------------\n",
-           label, nq, k);
+    printf("\n-- %s (%d queries, recall@%d) ----\n",label,nq,k);
     printf("  %-6s  recall@%-2d  QPS\n", "bw", k);
 
     for (int bw : bws) {
@@ -170,14 +331,19 @@ static void run_split(const char* label,
                         if ((int)r[i] == g[j]) { ++total_hits; break; }
             }
         }
+
         double rec = (double)total_hits / (double)((long long)nq * k);
         printf("  %-6d  %.4f     %.0f\n", bw, rec, nq / total_s);
+        resultH5(ids, scores, k, chunk, buildT, preproT, total_s,  cfg);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+
 int main(int argc, char** argv) {
     if (argc < 9) {
         fprintf(stderr,
@@ -190,134 +356,81 @@ int main(int argc, char** argv) {
     const char* train_f = argv[1];
     const char* allq_f  = argv[2];
     const char* allgt_f = argv[3];
-    const char* iq_f    = argv[4];
-    const char* igt_f   = argv[5];
-    const char* oq_f    = argv[6];
-    const char* ogt_f   = argv[7];
-    const int   K       = std::stoi(argv[8]);
-    int         BW      = (argc >= 10 && argv[9][0] != '-') ? std::stoi(argv[9]) : 256;
-    const int         MAX_DEG  = (argc >= 11) ? std::stoi(argv[10]) : 64;
-    const float       ALPHA    = (argc >= 12) ? std::stof(argv[11]) : 1.2f;
-    const int         LEAF_SZ  = (argc >= 13) ? std::stoi(argv[12]) : 512;
-    const int         MIN_LEAF = (argc >= 14) ? std::stoi(argv[13]) : 32;
-    const int         K_ENTRY  = (argc >= 15) ? std::stoi(argv[14]) : 12;
-    const int         ENT_SAMP = (argc >= 16) ? std::stoi(argv[15]) : 3000;
-    const int         HBITS    = (argc >= 17) ? std::stoi(argv[16]) : 12;
-    const int         RES_CAP  = (argc >= 18) ? std::stoi(argv[17]) : 128;
-    const int         REPLICAS = (argc >= 19) ? std::stoi(argv[18]) : 1;
-    const bool        F_PRUNE  = (argc >= 20) ? (std::stoi(argv[19]) != 0) : true;
-    const bool        B_EDGE   = (argc >= 21) ? (std::stoi(argv[20]) != 0) : true;
-    const int         N_THREADS= (argc >= 22) ? std::stoi(argv[21]) : 0;
-    const uint64_t    SEED     = (argc >= 23) ? (uint64_t)std::stoull(argv[22]) : 42;
-    const bool        RAND     = (argc >= 24) ? std::stoi(argv[23]) : false;
-    const bool        COOCKED     = (argc >= 25) ? std::stoi(argv[24]) : false;
-
+    const int   K       = std::stoi(argv[4]);
+    double Prepro_time = std::stod(argv[5]);
+    int         BW      = (argc >= 10 && argv[7][0] != '-') ? std::stoi(argv[6]) : 256;
+    const int         MAX_DEG  = (argc >= 8) ? std::stoi(argv[7]) : 64;
+    const float       ALPHA    = (argc >= 9) ? std::stof(argv[8]) : 1.2f;
+    const int         LEAF_SZ  = (argc >= 10) ? std::stoi(argv[9]) : 512;
+    const int         MIN_LEAF = (argc >= 11) ? std::stoi(argv[10]) : 32;
+    const int         K_ENTRY  = (argc >= 12) ? std::stoi(argv[11]) : 12;
+    const int         ENT_SAMP = (argc >= 13) ? std::stoi(argv[12]) : 3000;
+    const int         HBITS    = (argc >= 14) ? std::stoi(argv[13]) : 12;
+    const int         RES_CAP  = (argc >= 15) ? std::stoi(argv[14]) : 128;
+    const int         REPLICAS = (argc >= 16) ? std::stoi(argv[15]) : 1;
+    const bool        F_PRUNE  = (argc >= 17) ? (std::stoi(argv[16]) != 0) : true;
+    const bool        B_EDGE   = (argc >= 18) ? (std::stoi(argv[17]) != 0) : true;
+    const int         N_THREADS= (argc >= 19) ? std::stoi(argv[18]) : 0;
+    const uint64_t    SEED     = (argc >= 20) ? (uint64_t)std::stoull(argv[19]) : 42;
+    const bool        RAND     = (argc >= 21) ? std::stoi(argv[20]) : false;
+    const bool        COOCKED     = (argc >= 22) ? std::stoi(argv[21]) : false;
     std::string save_idx, load_idx;
-    // for (int i = 9; i < argc - 1; ++i) {
-    //     if (!std::strcmp(argv[i], "--save-index")) save_idx = argv[++i];
-    //     if (!std::strcmp(argv[i], "--load-index")) load_idx = argv[++i];
-    // }
+    for (int i = 5; i < argc - 1; ++i) { //starts in 5 because train_f ... K are necessary.
+        if (!std::strcmp(argv[i], "--save-index")) save_idx = argv[++i];
+        if (!std::strcmp(argv[i], "--load-index")) load_idx = argv[++i];
+    }
 
 #if PIPNN_AVX2
     printf("AVX2+FMA  enabled\n");
 #else
-    printf("AVX2      disabled (scalar fallback)\n");
+    printf("AVX2      disabled\n");
 #endif
-
-    // ── Load data ─────────────────────────────────────────────────────────
-    printf("\nLoading train vectors (float16) ...\n");
-    MmapVecs16 train;
-    train.open(train_f);
-    const int Nt = train.n, D = train.d;
+    auto cont_prepro = clk::now();
+    printf("\nLoading train ...\n");
+    MmapVecs train; train.open(train_f);
+    const int Nt=train.n, D=train.d;
 
     printf("Loading allknn queries ...\n");
     QueryVecs allq; allq.open(allq_f);
-
-    int Nallgt, Kallgt;
-    printf("Loading allknn GT ...\n");
+    int Nallgt,Kallgt; printf("Loading allknn GT ...\n");
     auto allgt = read_gt(allgt_f, Nallgt, Kallgt);
 
-    printf("Loading itest queries ...\n");
-    QueryVecs iq; iq.open(iq_f);
+    if (D!=allq.d){
+        fprintf(stderr,"Dimension mismatch: train=%d allknn=%d\n",
+                D,allq.d); return 1;}
 
-    int Nigt, Kigt;
-    printf("Loading itest GT ...\n");
-    auto igt = read_gt(igt_f, Nigt, Kigt);
-
-    printf("Loading otest queries ...\n");
-    QueryVecs oq; oq.open(oq_f);
-
-    int Nogt, Kogt;
-    printf("Loading otest GT ...\n");
-    auto ogt = read_gt(ogt_f, Nogt, Kogt);
-    printf("\n");
-
-    if (D != allq.d || D != iq.d || D != oq.d) {
-        fprintf(stderr, "Dimension mismatch: train=%d allknn=%d itest=%d otest=%d\n",
-                D, allq.d, iq.d, oq.d);
-        return 1;
-    }
-
-    // ── Config ────────────────────────────────────────────────────────────
-    auto cfg = pipnn::make_config(D, Nt);
-    cfg.beam_width = BW;
-    cfg.final_prune = F_PRUNE;
-    cfg.back_edge = B_EDGE;
-    cfg.leaf_size = LEAF_SZ;
-    cfg.randomness = RAND;
-    cfg.coocked = COOCKED;
-    cfg.min_leaf_size = MIN_LEAF;
-    cfg.k_entry       = K_ENTRY;
-    cfg.entry_sample  = ENT_SAMP;
-    cfg.hash_bits     = HBITS;
-    cfg.reservoir_cap = RES_CAP;
-    cfg.num_replicas  = REPLICAS;
-    cfg.final_prune   = F_PRUNE;
-    cfg.back_edge     = B_EDGE;
-    cfg.num_threads   = N_THREADS;
-    cfg.seed          = SEED;
-    printf("Config: leaf_size=%d  max_degree=%d  alpha=%.2f  "
-           "k_entry=%d  beam_width=%d  final_prune=%d  back_edge=%d\n"
-           "        hash_bits=%d  reservoir_cap=%d  num_replicas=%d  "
-           "num_threads=%d  seed=%llu  randomness=%d  coocked=%d\n\n",
-           cfg.leaf_size, cfg.max_degree, cfg.alpha, cfg.k_entry, BW,
-           cfg.final_prune, cfg.back_edge, cfg.hash_bits, cfg.reservoir_cap,
-           cfg.num_replicas, cfg.num_threads, (unsigned long long)cfg.seed, 
-           cfg.randomness, cfg.coocked);
-
-    // ── Build or load index ───────────────────────────────────────────────
+    auto cfg = pipnn::make_config(D, Nt); cfg.beam_width = BW;
+    printf("Config : leaf_size=%-4d  max_degree=%-3d  alpha=%.1f  "
+           "k_entry=%d  bw=%d\n\n",
+           cfg.leaf_size,cfg.max_degree,cfg.alpha,cfg.k_entry,BW);
+    Prepro_time += sec(cont_prepro);
+    printf("Prepro time is %f\n", Prepro_time);
     pipnn::IndexDot idx(cfg);
-
-    if (!load_idx.empty() && std::ifstream(load_idx).good()) {
+    double build_s = 0.0;
+    if (!load_idx.empty() && std::ifstream(load_idx).good()){
         printf("Loading pre-built index from %s ...\n", load_idx.c_str());
         auto t = clk::now();
-        if (!idx.load(load_idx)) { fprintf(stderr, "Load failed\n"); return 1; }
-        idx.set_data_f16(train.data());
+        if (!idx.load(load_idx)){ fprintf(stderr,"Load failed\n"); return 1; }
+        train.set_data(idx);
         printf("  Loaded in %.2f s\n", sec(t));
     } else {
-        printf("Building index on %d x %d vectors (float16) ...\n", Nt, D);
+        printf("Building index on %d x %d vectors (%s) ...\n",
+               Nt, D, dtype_name(train.dtype));
         auto t = clk::now();
-        idx.build_f16(train.data(), Nt);
-        double build_s = sec(t);
-        auto   st      = idx.stats();
-        printf("  Build time : %.2f s\n",    build_s);
-        printf("  Avg degree : %.1f\n",       st.avg_deg);
-        printf("  Bidir      : %.1f%%\n\n",   100.0 * st.frac_bidir);
-
-        if (!save_idx.empty()) {
+        train.build_index(idx);
+        build_s = sec(t);
+        auto st = idx.stats();
+        printf("  Build time : %.2f s\n",   build_s);
+        printf("  Avg degree : %.1f\n",      st.avg_deg);
+        printf("  Bidir      : %.1f%%\n\n",  100.0*st.frac_bidir);
+        if (!save_idx.empty()){
             printf("Saving index to %s ...\n", save_idx.c_str());
-            idx.save(save_idx);
-        }
+            idx.save(save_idx);}
     }
 
-    // ── Beam-width sweep ─────────────────────────────────────────────────
-    // std::vector<int> bws = { BW/4, BW/2, BW, BW*2 };
     std::vector<int> bws = {BW};
-
-    run_split("allknn", idx, allq.data.data(), allq.n, D, allgt, Kallgt, K, bws);
-    run_split("itest",  idx, iq.data.data(),   iq.n,   D, igt,   Kigt,   K, bws);
-    run_split("otest",  idx, oq.data.data(),   oq.n,   D, ogt,   Kogt,   K, bws);
-
+    run_split("allknn", idx, allq.data.data(), allq.n, D, allgt, Kallgt, K, bws, Prepro_time, build_s, cfg, Nt);
     printf("\nDone.\n");
     return 0;
 }
+

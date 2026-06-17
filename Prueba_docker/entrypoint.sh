@@ -16,7 +16,6 @@ set -euo pipefail
 echo "========================================"
 echo "  PiPNN SISAP 2026 Benchmark"
 echo "========================================"
-echo "  K              = ${K}"
 echo "  BEAM_WIDTH     = ${BEAM_WIDTH}"
 echo "  MAX_DEGREE     = ${MAX_DEGREE}"
 echo "  ALPHA          = ${ALPHA}"
@@ -52,8 +51,7 @@ fi
 
 # ── Launch benchmark ──────────────────────────────────────────────────────────
 exec python3 /app/run_sisap2026.py \
-    --work    "${WORK_DIR}"      \
-    --k       "${K}"             \
+    --output    "${WORK_DIR}"      \
     --bw      "${BEAM_WIDTH}"    \
     --max_degree     "${MAX_DEGREE}"     \
     --alpha          "${ALPHA}"          \
@@ -70,5 +68,6 @@ exec python3 /app/run_sisap2026.py \
     --seed           "${SEED}"           \
     --randomness     "${RAND}"           \
     --coocked        "${COOCKED}"         \
-    --dataset        "wikipedia-small"   \
+    --input        "${INPUT}"   \
+    --task_description "${CONF}"
     "$@"   # any extra args passed directly to docker run are forwarded here

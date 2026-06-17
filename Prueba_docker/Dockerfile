@@ -60,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-venv \
         wget \
         ca-certificates \
+        pkg-config libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ───────────────────────────────────────────────────────
@@ -76,8 +77,6 @@ COPY run_sisap2026.py  .
 
 # ── Default hyperparameters ───────────────────────────────────────────────────
 # Query / retrieval
-# Number of nearest neighbours to retrieve
-ENV K=15
 
 # Beam width during graph search (higher = better recall, slower)
 ENV BEAM_WIDTH=256        
@@ -112,6 +111,11 @@ ENV RAND=0
 # COOCKED
 ENV COOCKED=0
 
+#Input
+ENV INPUT='/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5'
+#Config
+ENV CONF='/data/sisap_work/wikipedia-small/config.json'
+
 # Runtime / system
 # OMP threads for build+query (0 = all available cores)
 ENV NUM_THREADS=0
@@ -126,7 +130,8 @@ ENV WORK_DIR=/data/sisap_work
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+RUN sed -i 's/\r//' entrypoint.sh && chmod +x entrypoint.sh
+# RUN chmod +x entrypoint.sh
 
 VOLUME ["/data"]
 
