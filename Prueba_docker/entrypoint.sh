@@ -69,5 +69,6 @@ exec python3 /app/run_sisap2026.py \
     --randomness     "${RAND}"           \
     --coocked        "${COOCKED}"         \
     --input        "${INPUT}"   \
-    --task_description "${CONF}"
+    --task_description "${CONF}"\
+    --precision "${PRECISION}"
     "$@"   # any extra args passed directly to docker run are forwarded here

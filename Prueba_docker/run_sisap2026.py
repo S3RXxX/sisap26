@@ -92,15 +92,6 @@ def mem_estimate(n, d, precision):
     graph_gb = n * 64 * 4 / 1e9          # flat graph (max_degree=64, id_t=4B)
     return vecs_gb, graph_gb
 
-# ── Normalisation + float16 conversion ────────────────────────────────────────
-def l2_norm_f16(v: np.ndarray) -> np.ndarray:
-    """L2-normalise rows in float32, then cast to float16."""
-    v32 = v.astype(np.float32, copy=False)
-    n = np.linalg.norm(v32, axis=1, keepdims=True)
-    v32 = v32 / np.where(n == 0, 1.0, n)
-    return v32.astype(np.float16)
-
-
 # ── Binary writers (float16 vectors, int32 ground truth) ──────────────────────
 
 # ── Normalise + quantise ──────────────────────────────────────────────────────
@@ -194,7 +185,8 @@ def bin_path(work: str, name: str, precision: str) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="SISAP 2026 PiPNN benchmark",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--input",       default="/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
                     help="dataset path")
     ap.add_argument("--task_description",       default="/data/sisap_work/wikipedia-small/config.json",
@@ -282,8 +274,8 @@ def main():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py"])
         import h5py
 
-    train_bin    = os.path.join(work, "train_f16.bin")
-    allknn_q_bin = os.path.join(work, "allknn_q_f16.bin")
+    train_bin    = bin_path(work, "train",    prec)
+    allknn_q_bin = bin_path(work, "allknn_q", prec)
     allknn_gt_bin= os.path.join(work, "allknn_gt.bin")
 
     with h5py.File(h5_local, "r") as h5:
@@ -307,11 +299,10 @@ def main():
         node = h5
         for part in gt_I:
             node = node[part]
-        allknn_gt_raw = node[:]
-        allknn_0 = allknn_gt_raw.astype(np.int32)
-        if allknn_0.min() > 0:
+        allknn_gt_raw = node[:].astype(np.int32)
+        if allknn_gt_raw.min() > 0:
             log("  1-based -> 0-based")
-            allknn_0 -= 1
+            allknn_gt_raw -= 1
 
         # ── allknn queries: sample or full ────────────────────────────
         sample_n = args.allknn_sample

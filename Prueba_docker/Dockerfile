@@ -110,6 +110,8 @@ ENV SEED=42
 ENV RAND=0
 # COOCKED
 ENV COOCKED=0
+#PRECISION
+ENV PRECISION='float16'
 
 #Input
 ENV INPUT='/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5'
