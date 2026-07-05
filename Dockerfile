@@ -52,28 +52,22 @@
 FROM ubuntu:24.04
 
 # ── System dependencies ───────────────────────────────────────────────────────
+# No Python any more: sisap_bench.cpp reads the HDF5 file, quantises to int8,
+# builds, queries, and writes results all in one C++ binary. jq is only used
+# by entrypoint.sh to pull a few strings (input path, k, dataset names) out
+# of the two small JSON config files.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         libgomp1 \
-        python3 \
-        python3-pip \
-        python3-venv \
-        wget \
+        jq \
         ca-certificates \
         pkg-config libhdf5-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# ── Python dependencies ───────────────────────────────────────────────────────
-RUN pip3 install --no-cache-dir --break-system-packages \
-        h5py \
-        numpy \
-        huggingface_hub
 
 # ── Copy source files ─────────────────────────────────────────────────────────
 WORKDIR /app
 COPY pipnn_dot.hpp     .
 COPY sisap_bench.cpp   .
-COPY run_sisap2026.py  .
 COPY config_pipnn.json  .
 
 # ── Default hyperparameters ───────────────────────────────────────────────────
@@ -111,13 +105,18 @@ ENV SEED=42
 ENV RAND=0
 # COOCKED
 ENV COOCKED=0
-#PRECISION
-ENV PRECISION='int8'
+# Vectors are always stored/queried as int8 now (no other precision path)
 
-#Input
-# ENV INPUT='/app/data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5'
-# #Config
-# ENV CONF='/data/sisap_work/wikipedia-small/config.json'
+# Number of train vectors sampled as all-kNN queries (0 = use the full
+# training set as queries, reusing the same in-memory buffer, no copy)
+ENV ALLKNN_SAMPLE=0
+
+# Where the results HDF5 file is written
+ENV OUTPUT_PATH=/tira-data/output/results.h5
+
+# Input / task description resolution now happens via config_pipnn.json,
+# read by entrypoint.sh with jq:
+#   {"input": "<h5 path>", "task_description": "<task config.json path>"}
 
 # Runtime / system
 # OMP threads for build+query (0 = all available cores)

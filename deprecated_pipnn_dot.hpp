@@ -565,27 +565,6 @@ public:
                         out_scores.data()+(size_t)qi*k);
     }
 
-    // Query directly from int8 rows (e.g. the same buffer used to build the
-    // index, for an all-kNN run). Avoids ever materialising a full float32
-    // copy of the query set: each row is decoded into a small thread-local
-    // scratch buffer right before the search that needs it.
-    void query_i8(const int8_t* queries,int nq,int k,
-                  std::vector<id_t>& out_ids,std::vector<float>& out_scores,
-                  int bw=0)const{
-        if(bw<=0)bw=cfg_.beam_width;bw=std::max(bw,k);
-        out_ids.assign((size_t)nq*k,NO_ID);out_scores.assign((size_t)nq*k,-INF_D);
-        const int d=cfg_.dim;
-#pragma omp parallel for schedule(dynamic,1)
-        for(int qi=0;qi<nq;++qi){
-            static thread_local std::vector<float> qbuf;
-            if((int)qbuf.size()<d) qbuf.resize(d);
-            i8_to_f32(queries+(size_t)qi*d, qbuf.data(), d);
-            beam_search(qbuf.data(),k,bw,
-                        out_ids.data()+(size_t)qi*k,
-                        out_scores.data()+(size_t)qi*k);
-        }
-    }
-
     static constexpr uint32_t MAGIC=0x544F4450u,VER=1u;
     bool save(const std::string& p)const{
         FILE*fp=std::fopen(p.c_str(),"wb");if(!fp)return false;
