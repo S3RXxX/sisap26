@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml – PiPNN SISAP 2026 Benchmark
+#
+# HOW TO BUILD + RUN:
+#   docker compose up --build
+#
+# HOW TO OVERRIDE HYPERPARAMETERS (no need to edit this file):
+#   Create a ".env" file next to this one, e.g.:
+#     BEAM_WIDTH=256
+#     MEMORY_LIMIT_GB=20
+#     HOST_MEMORY_LIMIT=24g
+#   docker compose reads .env automatically.
+#
+#   Or override on the command line for a one-off run:
+#     BEAM_WIDTH=256 docker compose up --build
+#
+# DATA LAYOUT EXPECTED (same as `docker run -v $(pwd)/data:/data`):
+#   ./data/...      -> mounted read-only at /data       (your HDF5 + config.json)
+#   ./output/...    -> mounted at /tira-data/output      (results.h5 ends up here)
+#
+# If "docker compose up" reports it can't find your HDF5/config file, check:
+#   1. That config_pipnn.json's "input"/"task_description" paths are correct
+#      relative to whatever you have under ./data (entrypoint.sh resolves
+#      any non-absolute path against /data automatically).
+#   2. That ./data actually contains the files (a typo'd COPY into the image
+#      at build time is a common culprit — this compose file mounts your
+#      live ./data directory instead, so no rebuild is needed to fix a data
+#      path/layout problem, only a config_pipnn.json edit).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  pipnn-sisap:
+    build: .
+    image: pipnn-sisap
+    container_name: pipnn-sisap
+
+    volumes:
+      - ./data:/data
+      - ./output:/tira-data/output
+
+    # Hard, Docker-enforced memory cap (OOM-killed if exceeded). Keep this
+    # comfortably above MEMORY_LIMIT_GB below, which is a *soft* in-process
+    # ulimit the container also applies so it can fail more gracefully.
+    mem_limit: ${HOST_MEMORY_LIMIT:-24g}
+
+    environment:
+      # Query / retrieval
+      BEAM_WIDTH: ${BEAM_WIDTH:-32}
+
+      # Graph build parameters
+      MAX_DEGREE: ${MAX_DEGREE:-64}
+      ALPHA: ${ALPHA:-1.2}
+      LEAF_SIZE: ${LEAF_SIZE:-512}
+      MIN_LEAF_SIZE: ${MIN_LEAF_SIZE:-32}
+      K_ENTRY: ${K_ENTRY:-12}
+      ENTRY_SAMPLE: ${ENTRY_SAMPLE:-3000}
+      HASH_BITS: ${HASH_BITS:-12}
+      RESERVOIR_CAP: ${RESERVOIR_CAP:-128}
+      NUM_REPLICAS: ${NUM_REPLICAS:-1}
+      FINAL_PRUNE: ${FINAL_PRUNE:-1}
+      BACK_EDGE: ${BACK_EDGE:-1}
+      SEED: ${SEED:-42}
+      RAND: ${RAND:-0}
+      COOCKED: ${COOCKED:-0}
+      ALLKNN_SAMPLE: ${ALLKNN_SAMPLE:-0}
+
+      # Runtime / system
+      NUM_THREADS: ${NUM_THREADS:-0}
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-0}
+      MEMORY_LIMIT_GB: ${MEMORY_LIMIT_GB:-20}
+      WORK_DIR: /data/sisap_work
+      OUTPUT_PATH: /tira-data/output/results.h5

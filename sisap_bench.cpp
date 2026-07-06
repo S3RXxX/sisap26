@@ -129,7 +129,7 @@ static std::vector<int> load_gt(H5::H5File& file, const std::string& path, int& 
 // ─────────────────────────────────────────────────────────────────────────────
 static void resultH5(const std::vector<int>& knns, const std::vector<float>& dists,
                       int k, int n, double buildT, double preproT, double queryT,
-                      pipnn::Config cfg, const char* output) {
+                      pipnn::Config cfg, const std::string& dataset_name, const char* output) {
     H5::H5File file(output, H5F_ACC_TRUNC);
 
     hsize_t dims[2] = {static_cast<hsize_t>(n), static_cast<hsize_t>(k)};
@@ -153,6 +153,19 @@ static void resultH5(const std::vector<int>& knns, const std::vector<float>& dis
         H5::Attribute attr = file.createAttribute("task", strdatatype, scalarSpace);
         std::string value = "task1";
         attr.write(strdatatype, value);
+    }
+    // Which dataset this result was produced against — mirrors the key
+    // eval.py's _discover_datasets() uses: cfg.get("dataset_name",
+    // Path(cfg_path).parent.name). Written under both "dataset_name" (exact
+    // match with that dict key) and "dataset" (the older SISAP convention),
+    // so eval.py can look results up either way.
+    {
+        H5::Attribute attr = file.createAttribute("dataset_name", strdatatype, scalarSpace);
+        attr.write(strdatatype, dataset_name);
+    }
+    {
+        H5::Attribute attr = file.createAttribute("dataset", strdatatype, scalarSpace);
+        attr.write(strdatatype, dataset_name);
     }
     {
         H5::Attribute attr = file.createAttribute("params", strdatatype, scalarSpace);
@@ -189,12 +202,12 @@ static void resultH5(const std::vector<int>& knns, const std::vector<float>& dis
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    if (argc < 23) {
+    if (argc < 24) {
         fprintf(stderr,
             "Usage: %s input.h5 train_dataset gt_path k output.h5 allknn_sample "
             "bw max_degree alpha leaf_size min_leaf_size k_entry entry_sample "
             "hash_bits reservoir_cap num_replicas final_prune back_edge "
-            "num_threads seed randomness coocked "
+            "num_threads seed randomness coocked dataset_name "
             "[--save-index PATH] [--load-index PATH]\n", argv[0]);
         return 1;
     }
@@ -221,9 +234,10 @@ int main(int argc, char** argv) {
     const uint64_t SEED     = (uint64_t)std::stoull(argv[20]);
     const bool  RAND        = std::stoi(argv[21]) != 0;
     const bool  COOCKED     = std::stoi(argv[22]) != 0;
+    const std::string DATASET_NAME = argv[23];
 
     std::string save_idx, load_idx;
-    for (int i = 23; i < argc - 1; ++i) {
+    for (int i = 24; i < argc - 1; ++i) {
         if (!std::strcmp(argv[i], "--save-index")) save_idx = argv[++i];
         if (!std::strcmp(argv[i], "--load-index")) load_idx = argv[++i];
     }
@@ -354,7 +368,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < ids.size(); ++i)
         ids_out[i] = (ids[i] == pipnn::NO_ID) ? 0 : (int)ids[i] + 1;
 
-    resultH5(ids_out, scores, K, nq, build_s, prepro_s, query_s, cfg, output);
+    resultH5(ids_out, scores, K, nq, build_s, prepro_s, query_s, cfg, DATASET_NAME, output);
 
     printf("\nDone.\n");
     return 0;

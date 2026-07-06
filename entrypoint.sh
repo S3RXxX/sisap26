@@ -53,15 +53,38 @@ mkdir -p "${WORK_DIR}"
 
 # ── Resolve dataset paths from config_pipnn.json ─────────────────────────────
 # config_pipnn.json  -> {"input": "<h5 file>", "task_description": "<config.json>"}
-INPUT_H5=$(jq -r '.input' /app/config_pipnn.json)
-TASK_JSON=$(jq -r '.task_description' /app/config_pipnn.json)
+#
+# Paths in config_pipnn.json may be given as absolute container paths
+# (e.g. "/data/wikipedia-small/...") or as paths relative to the mounted
+# data volume (e.g. "wikipedia-small/..." or the older
+# "data/sisap_work/wikipedia-small/..." convention). Anything that isn't
+# already absolute is resolved against /data, which is where `docker run -v
+# .../data:/data` (and the provided docker-compose.yml) mount your host data
+# directory. This is what the old version got wrong: a relative path in the
+# JSON was being resolved against /app (the image's WORKDIR) instead of
+# /data (the actual mount point), so it silently looked in the wrong place.
+resolve_path() {
+    local p="$1"
+    if [[ "$p" = /* ]]; then
+        echo "$p"
+    else
+        echo "/data/${p#data/}"   # strip a leading "data/" too, for the old convention
+    fi
+}
 
-if [ ! -f "${TASK_JSON}" ]; then
-    echo "ERROR: task description file not found: ${TASK_JSON}" >&2
-    exit 1
-fi
-if [ ! -f "${INPUT_H5}" ]; then
-    echo "ERROR: input HDF5 file not found: ${INPUT_H5}" >&2
+RAW_INPUT_H5=$(jq -r '.input' /app/config_pipnn.json)
+RAW_TASK_JSON=$(jq -r '.task_description' /app/config_pipnn.json)
+INPUT_H5=$(resolve_path "${RAW_INPUT_H5}")
+TASK_JSON=$(resolve_path "${RAW_TASK_JSON}")
+
+if [ ! -f "${TASK_JSON}" ] || [ ! -f "${INPUT_H5}" ]; then
+    echo "----------------------------------------" >&2
+    [ ! -f "${TASK_JSON}" ] && echo "ERROR: task description file not found: ${TASK_JSON}  (from config_pipnn.json: \"${RAW_TASK_JSON}\")" >&2
+    [ ! -f "${INPUT_H5}" ]  && echo "ERROR: input HDF5 file not found: ${INPUT_H5}  (from config_pipnn.json: \"${RAW_INPUT_H5}\")" >&2
+    echo "" >&2
+    echo "Checked under /data. Is your data volume mounted there? Contents of /data:" >&2
+    find /data -maxdepth 3 2>/dev/null >&2 || echo "  (nothing mounted at /data)" >&2
+    echo "----------------------------------------" >&2
     exit 1
 fi
 
@@ -71,11 +94,23 @@ TRAIN_DS=$(jq -r '.data' "${TASK_JSON}")
 GT_PATH=$(jq -r '.gt_I | join("/")' "${TASK_JSON}")
 K=$((K + 1))   # sisap_bench, like the old script, queries k+1 and drops self-match
 
+# dataset_name — mirrors eval.py's _discover_datasets():
+#   cfg.get("dataset_name", Path(cfg_path).parent.name)
+# i.e. prefer an explicit "dataset_name" key in the task's config.json, and
+# otherwise fall back to the name of the folder that config.json lives in
+# (e.g. "wikipedia-small", "wikipedia"). This gets written into the output
+# results.h5 as an attribute so eval.py can look the run up by dataset.
+DATASET_NAME=$(jq -r '.dataset_name // empty' "${TASK_JSON}")
+if [ -z "${DATASET_NAME}" ]; then
+    DATASET_NAME=$(basename "$(dirname "${TASK_JSON}")")
+fi
+
 echo "  INPUT_H5   = ${INPUT_H5}"
 echo "  TASK_JSON  = ${TASK_JSON}"
 echo "  TRAIN_DS   = ${TRAIN_DS}"
 echo "  GT_PATH    = ${GT_PATH}"
 echo "  K (k+1)    = ${K}"
+echo "  DATASET    = ${DATASET_NAME}"
 echo "========================================"
 
 # ── Optional soft RAM limit ───────────────────────────────────────────────────
@@ -140,4 +175,5 @@ exec "${BENCH_BIN}" \
     "${SEED}" \
     "${RAND}" \
     "${COOCKED}" \
+    "${DATASET_NAME}" \
     "$@"   # any extra args passed directly to docker run (e.g. --save-index PATH)
