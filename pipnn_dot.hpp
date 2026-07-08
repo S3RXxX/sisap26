@@ -24,6 +24,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <chrono>
 #ifdef _OPENMP
 #  include <omp.h>
 #endif
@@ -193,31 +194,6 @@ inline dist_t build_dist(const float* a, const float* b, int d) noexcept {
 }
 inline dist_t query_dist(const float* a, const float* b, int d) noexcept {
     return -dot_avx(a, b, d);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// All-pairs build-distance  D[i*nB+j] = 1 - dot(A[i], B[j])
-// ─────────────────────────────────────────────────────────────────────────────
-static void all_pairs_bd(const float* A, int nA,
-                          const float* B, int nB, int d,
-                          std::vector<dist_t>& D) {
-    static thread_local std::vector<float> tl_BT;
-    tl_BT.resize((size_t)d * nB);
-    for (int j = 0; j < nB; ++j)
-        for (int k = 0; k < d; ++k)
-            tl_BT[(size_t)k*nB+j] = B[(size_t)j*d+k];
-
-    D.resize((size_t)nA * nB);
-    std::fill(D.begin(), D.end(), 1.0f);
-    for (int i = 0; i < nA; ++i) {
-        dist_t* Di = D.data() + (size_t)i*nB;
-        const float* Ai = A + (size_t)i*d;
-        for (int k = 0; k < d; ++k) {
-            float aik = Ai[k];
-            const float* BTk = tl_BT.data() + (size_t)k*nB;
-            for (int j = 0; j < nB; ++j) Di[j] -= aik * BTk[j];
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -647,6 +623,8 @@ private:
 #ifdef _OPENMP
         if(cfg_.num_threads>0) omp_set_num_threads(cfg_.num_threads);
 #endif
+        printf("PiPNN 0\n");
+        fflush(stdout);
         lsh_.init(m,d,cfg_.seed);
         sketches_.resize((size_t)n*m);
 #pragma omp parallel for schedule(static)
@@ -658,16 +636,26 @@ private:
 
         std::vector<std::vector<std::pair<dist_t,id_t>>> cands(n);
         std::mt19937_64 rng(cfg_.seed);
+        printf("PiPNN 1\n");
+        fflush(stdout);
 
         for(int rep=0;rep<cfg_.num_replicas;++rep){
             std::vector<id_t> all(n); std::iota(all.begin(),all.end(),0);
             Partition leaves; leaves.reserve(n/std::max(cfg_.leaf_size,1)*2);
+            auto start_recur = std::chrono::high_resolution_clock::now();
             int max_depth =rbc_recurse(dv, all, cfg_, 0, rng, leaves);
+            auto end_recur = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_recur - start_recur);
+            printf("Elapsed time: %ld ms\n", duration.count());
+            printf("max depth: %i\n", max_depth);
+            fflush(stdout);
             printf("max depth: %i\n", max_depth);
             int nl=(int)leaves.size();
 
             using E4=std::tuple<id_t,id_t,dist_t,dist_t>;
             std::vector<std::vector<E4>> leaf_edges(nl);
+            printf("PiPNN 2\n");
+            fflush(stdout);
 
 #pragma omp parallel for schedule(dynamic,1)
             for(int li=0;li<nl;++li){
@@ -676,26 +664,62 @@ private:
                 ld.resize((size_t)ln*d);
                 for(int i=0;i<ln;++i) dv.pack(&leaf[i], 1, ld.data()+(size_t)i*d);
 
-                std::vector<dist_t> dmat;
-                all_pairs_bd(ld.data(),ln,ld.data(),ln,d,dmat);
                 int k2=std::min(cfg_.knn_k,ln-1);
-                auto&elist=leaf_edges[li]; elist.reserve((size_t)ln*k2);
-                std::vector<int> idx(ln-1);
+
+                // Bounded top-k2 accumulator per point, flattened to one
+                // buffer: ln*k2 slots instead of the old ln*ln dense
+                // distance matrix (plus its ln*d transpose scratch buffer).
+                // For leaf_size=1024, knn_k=2 that's a ~500x reduction in
+                // peak per-leaf memory (2 floats/ids per point instead of
+                // 1024), and this scratch is reused (thread_local) across
+                // leaves rather than freshly allocated each time.
+                static thread_local std::vector<dist_t> topk_d;
+                static thread_local std::vector<id_t>   topk_id;
+                topk_d.assign((size_t)ln*k2, INF_D);
+                topk_id.assign((size_t)ln*k2, (id_t)-1);
+
+                auto topk_insert = [&](int row, dist_t dist, id_t id){
+                    dist_t*   rd = topk_d.data()  + (size_t)row*k2;
+                    id_t*     ri = topk_id.data() + (size_t)row*k2;
+                    int worst = 0; dist_t worst_d = rd[0];
+                    for(int t=1;t<k2;++t) if(rd[t]>worst_d){worst_d=rd[t]; worst=t;}
+                    if(dist<worst_d){ rd[worst]=dist; ri[worst]=id; }
+                };
+
+                // build_dist(a,b) = 1 - dot(a,b) is symmetric, so each pair
+                // only needs to be computed once (i<j) and fed into both
+                // points' top-k lists — half the distance evaluations the
+                // old full-matrix version did.
                 for(int i=0;i<ln;++i){
-                    const dist_t*row=dmat.data()+(size_t)i*ln;
-                    int cnt=0; for(int j=0;j<ln;++j) if(j!=i) idx[cnt++]=j;
-                    std::nth_element(idx.begin(),idx.begin()+k2,idx.begin()+cnt,
-                        [&](int a,int b){return row[a]<row[b];});
+                    const float* ai = ld.data()+(size_t)i*d;
+                    for(int j=i+1;j<ln;++j){
+                        dist_t dij = build_dist(ai, ld.data()+(size_t)j*d, d);
+                        topk_insert(i, dij, (id_t)j);
+                        topk_insert(j, dij, (id_t)i);
+                    }
+                }
+
+                auto&elist=leaf_edges[li]; elist.reserve((size_t)ln*k2);
+                for(int i=0;i<ln;++i){
+                    dist_t* rd = topk_d.data()  + (size_t)i*k2;
+                    id_t*   ri = topk_id.data() + (size_t)i*k2;
                     for(int ki=0;ki<k2;++ki){
-                        int j=idx[ki];
-                        elist.emplace_back(leaf[i],leaf[j],row[j],dmat[(size_t)j*ln+i]);
+                        if(ri[ki]==(id_t)-1) continue; // fewer than k2 neighbours available
+                        int j=(int)ri[ki];
+                        // symmetric distance, so the forward and reverse
+                        // edge weight are the same value
+                        elist.emplace_back(leaf[i],leaf[j],rd[ki],rd[ki]);
                     }
                 }
             }
+            printf("PiPNN 3\n");
+            fflush(stdout);
             for(int li=0;li<nl;++li)
                 for(auto&[s,t,df,db]:leaf_edges[li]){
                     cands[s].emplace_back(df,t); cands[t].emplace_back(db,s);
                 }
+            printf("PiPNN 4\n");
+            fflush(stdout);
         }
 
         std::vector<HashReservoir> res(n);
@@ -709,6 +733,8 @@ private:
                 res[i].insert(h,j,dist);
             }
         }
+        printf("PiPNN 5\n");
+        fflush(stdout);  
         {decltype(cands)().swap(cands);}
         {std::vector<float>().swap(sketches_);}
 
@@ -731,10 +757,15 @@ private:
                 g_.set(i,out2);
             }
         }
+        printf("PiPNN final prune done\n");
+        fflush(stdout);
 
         if(cfg_.back_edge) back_edge_pass(g_, dv, n, cfg_.alpha);
 
         entries_=diverse_entries(dv, n, cfg_.k_entry, cfg_.entry_sample, cfg_.seed);
+
+        printf("PiPNN extras done\n");
+        fflush(stdout);
     }
 
     void beam_search(const float* q, int k, int L,

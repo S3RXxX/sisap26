@@ -15,17 +15,26 @@
 #     BEAM_WIDTH=256 docker compose up --build
 #
 # DATA LAYOUT EXPECTED (same as `docker run -v $(pwd)/data:/data`):
-#   ./data/...      -> mounted read-only at /data       (your HDF5 + config.json)
-#   ./output/...    -> mounted at /tira-data/output      (results.h5 ends up here)
+#   ./data/<dataset-name>/<file>.h5   -> mounted read-only at /data/<dataset-name>/...
+#   ./data/<dataset-name>/config.json
+#   ./output/...                       -> mounted at /tira-data/output (results land here)
+#
+# e.g. for the wikipedia-small dataset:
+#   ./data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5
+#   ./data/wikipedia-small/config.json
+# and config_pipnn.json (baked into the image) pointing at:
+#   {"input": "wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
+#    "task_description": "wikipedia-small/config.json"}
+#
+# Results are written with a unique, per-hyperparameter filename by default:
+#   ./output/results/<task>/PiPNN_bw<BEAM_WIDTH>_deg<MAX_DEGREE>_ef<ENTRY_SAMPLE>.h5
+# Set OUTPUT_PATH in .env to force one exact fixed path instead.
 #
 # If "docker compose up" reports it can't find your HDF5/config file, check:
 #   1. That config_pipnn.json's "input"/"task_description" paths are correct
 #      relative to whatever you have under ./data (entrypoint.sh resolves
 #      any non-absolute path against /data automatically).
-#   2. That ./data actually contains the files (a typo'd COPY into the image
-#      at build time is a common culprit — this compose file mounts your
-#      live ./data directory instead, so no rebuild is needed to fix a data
-#      path/layout problem, only a config_pipnn.json edit).
+#   2. That ./data actually contains the files at that relative path.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -68,5 +77,9 @@ services:
       NUM_THREADS: ${NUM_THREADS:-0}
       OMP_NUM_THREADS: ${OMP_NUM_THREADS:-0}
       MEMORY_LIMIT_GB: ${MEMORY_LIMIT_GB:-20}
-      WORK_DIR: /data/sisap_work
-      OUTPUT_PATH: /tira-data/output/results.h5
+
+      # Output: leave OUTPUT_PATH empty (default) for an auto-generated,
+      # per-hyperparameter filename under OUTPUT_BASE_DIR; set OUTPUT_PATH
+      # in .env to force one exact fixed path instead.
+      OUTPUT_BASE_DIR: /tira-data/output
+      OUTPUT_PATH: ${OUTPUT_PATH:-}

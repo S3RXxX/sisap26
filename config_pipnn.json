@@ -1,4 +1,4 @@
 {
-    "input": "data/sisap_work/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
-    "task_description": "data/sisap_work/wikipedia-small/config.json"
+    "input": "wikipedia/benchmark-dev-wikipedia-bge-m3.h5",
+    "task_description": "wikipedia/config.json"
 }

@@ -46,7 +46,8 @@ echo "  OMP_NUM_THREADS= ${OMP_NUM_THREADS}"
 echo "  ALLKNN_SAMPLE  = ${ALLKNN_SAMPLE}"
 echo "  MEMORY_LIMIT_GB= ${MEMORY_LIMIT_GB}"
 echo "  WORK_DIR       = ${WORK_DIR}"
-echo "  OUTPUT_PATH    = ${OUTPUT_PATH}"
+echo "  OUTPUT_BASE_DIR= ${OUTPUT_BASE_DIR}"
+echo "  OUTPUT_PATH    = ${OUTPUT_PATH:-<auto>}"
 echo "========================================"
 
 mkdir -p "${WORK_DIR}"
@@ -56,13 +57,18 @@ mkdir -p "${WORK_DIR}"
 #
 # Paths in config_pipnn.json may be given as absolute container paths
 # (e.g. "/data/wikipedia-small/...") or as paths relative to the mounted
-# data volume (e.g. "wikipedia-small/..." or the older
-# "data/sisap_work/wikipedia-small/..." convention). Anything that isn't
-# already absolute is resolved against /data, which is where `docker run -v
-# .../data:/data` (and the provided docker-compose.yml) mount your host data
-# directory. This is what the old version got wrong: a relative path in the
-# JSON was being resolved against /app (the image's WORKDIR) instead of
-# /data (the actual mount point), so it silently looked in the wrong place.
+# data volume. The expected default layout is flat under /data, e.g.
+#   ./data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5
+#   ./data/wikipedia-small/config.json
+# with config_pipnn.json listing "wikipedia-small/..." (no leading /data/,
+# added automatically below). The older "data/sisap_work/wikipedia-small/..."
+# convention (with a literal "data/" prefix baked into the JSON) still
+# resolves correctly too — that leading "data/" is stripped before /data is
+# prepended, so it lands in the same place either way.
+#
+# This is what the earlier version got wrong: a relative path in the JSON
+# was being resolved against /app (the image's WORKDIR) instead of /data
+# (the actual mount point), so it silently looked in the wrong place.
 resolve_path() {
     local p="$1"
     if [[ "$p" = /* ]]; then
@@ -88,11 +94,11 @@ if [ ! -f "${TASK_JSON}" ] || [ ! -f "${INPUT_H5}" ]; then
     exit 1
 fi
 
-# task's own config.json -> {"k": N, "data": "train", "gt_I": ["otest","knns"]}
+# task's own config.json -> {"k": N, "data": "train", ...}
+# (gt_I is no longer read here — sisap_bench doesn't load ground truth or
+# compute recall any more; that's done externally against the results file)
 K=$(jq -r '.k' "${TASK_JSON}")
 TRAIN_DS=$(jq -r '.data' "${TASK_JSON}")
-GT_PATH=$(jq -r '.gt_I | join("/")' "${TASK_JSON}")
-K=$((K + 1))   # sisap_bench, like the old script, queries k+1 and drops self-match
 
 # dataset_name — mirrors eval.py's _discover_datasets():
 #   cfg.get("dataset_name", Path(cfg_path).parent.name)
@@ -104,13 +110,30 @@ DATASET_NAME=$(jq -r '.dataset_name // empty' "${TASK_JSON}")
 if [ -z "${DATASET_NAME}" ]; then
     DATASET_NAME=$(basename "$(dirname "${TASK_JSON}")")
 fi
+TASK_NAME=$(jq -r '.task // "task1"' "${TASK_JSON}" 2>/dev/null)
+if [ -z "${TASK_NAME}" ] || [ "${TASK_NAME}" = "null" ]; then
+    TASK_NAME="task1"
+fi
+
+# ── Output filename ───────────────────────────────────────────────────────────
+# Different hyperparameter combinations should not clobber each other's
+# results, so unless OUTPUT_PATH was explicitly set (e.g. by the official
+# harness, which wants an exact fixed path), we build a unique filename that
+# encodes the run's key parameters, laid out as:
+#   <OUTPUT_BASE_DIR>/results/<task>/PiPNN_bw<BEAM_WIDTH>_deg<MAX_DEGREE>_ef<ENTRY_SAMPLE>.h5
+if [ -z "${OUTPUT_PATH:-}" ]; then
+    PARAMS_TAG="bw${BEAM_WIDTH}_deg${MAX_DEGREE}_ef${ENTRY_SAMPLE}"
+    OUTPUT_PATH="${OUTPUT_BASE_DIR}/results/${TASK_NAME}/PiPNN_${PARAMS_TAG}.h5"
+fi
+mkdir -p "$(dirname "${OUTPUT_PATH}")"
 
 echo "  INPUT_H5   = ${INPUT_H5}"
 echo "  TASK_JSON  = ${TASK_JSON}"
 echo "  TRAIN_DS   = ${TRAIN_DS}"
-echo "  GT_PATH    = ${GT_PATH}"
-echo "  K (k+1)    = ${K}"
+echo "  K          = ${K}"
 echo "  DATASET    = ${DATASET_NAME}"
+echo "  TASK       = ${TASK_NAME}"
+echo "  OUTPUT_PATH= ${OUTPUT_PATH}"
 echo "========================================"
 
 # ── Optional soft RAM limit ───────────────────────────────────────────────────
@@ -155,7 +178,6 @@ fi
 exec "${BENCH_BIN}" \
     "${INPUT_H5}" \
     "${TRAIN_DS}" \
-    "${GT_PATH}" \
     "${K}" \
     "${OUTPUT_PATH}" \
     "${ALLKNN_SAMPLE}" \

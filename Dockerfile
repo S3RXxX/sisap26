@@ -111,8 +111,13 @@ ENV COOCKED=0
 # training set as queries, reusing the same in-memory buffer, no copy)
 ENV ALLKNN_SAMPLE=0
 
-# Where the results HDF5 file is written
-ENV OUTPUT_PATH=/tira-data/output/results.h5
+# Where the final results HDF5 file is written. Leave this EMPTY (default) to
+# auto-generate a unique filename per hyperparameter combination:
+#   ${OUTPUT_BASE_DIR}/results/<task>/PiPNN_bw<BEAM_WIDTH>_deg<MAX_DEGREE>_ef<ENTRY_SAMPLE>.h5
+# Set OUTPUT_PATH explicitly (e.g. via -e OUTPUT_PATH=/tira-data/output/results.h5)
+# to force an exact fixed path instead, e.g. for a harness that expects one.
+ENV OUTPUT_PATH=
+ENV OUTPUT_BASE_DIR=/tira-data/output
 
 # Input / task description resolution now happens via config_pipnn.json,
 # read by entrypoint.sh with jq:
@@ -126,9 +131,10 @@ ENV OMP_NUM_THREADS=0
 # Soft RAM limit in GB via ulimit (0 = unlimited)
 ENV MEMORY_LIMIT_GB=0
 
-# Data path
-# Where binary files and the compiled binary are written
-ENV WORK_DIR=/data/sisap_work
+# Where the compiled binary is cached across runs. Deliberately NOT under
+# /data — that directory is your mounted dataset volume, and writing build
+# artifacts into it would clutter (and, on read-only dataset mounts, fail).
+ENV WORK_DIR=/var/cache/sisap_work
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY entrypoint.sh .

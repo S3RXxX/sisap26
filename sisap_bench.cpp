@@ -25,22 +25,25 @@
  *      thread-local scratch buffer.
  *
  *   3. No Python step: this program reads the HDF5 file directly (train
- *      vectors + ground truth) and quantises straight to int8 while
- *      streaming it in, instead of shelling out to a Python export script.
- *      Per the task, the input embeddings are already L2-normalised, so
- *      there is no normalisation pass here — just round(v*127) clipped to
- *      [-127,127].
+ *      vectors) and quantises straight to int8 while streaming it in,
+ *      instead of shelling out to a Python export script. Per the task, the
+ *      input embeddings are already L2-normalised, so there is no
+ *      normalisation pass here — just round(v*127) clipped to [-127,127].
+ *
+ *   4. No ground truth is loaded and no recall is computed here — that's
+ *      done externally against the output results.h5, so this program only
+ *      needs the training vectors, never the (potentially large) GT array.
  *
  * Usage:
- *   ./sisap_bench <input.h5> <train_dataset_name> <gt_dataset_path> <k> \
+ *   ./sisap_bench <input.h5> <train_dataset_name> <k> \
  *                 <output.h5> <allknn_sample> <bw> <max_degree> <alpha> \
  *                 <leaf_size> <min_leaf_size> <k_entry> <entry_sample> \
  *                 <hash_bits> <reservoir_cap> <num_replicas> <final_prune> \
  *                 <back_edge> <num_threads> <seed> <randomness> <coocked> \
+ *                 <dataset_name> \
  *                 [--save-index PATH] [--load-index PATH]
  *
  *   <train_dataset_name>  e.g. "train"          (config.json "data")
- *   <gt_dataset_path>     e.g. "otest/knns"      (config.json "gt_I" joined with '/')
  *   <allknn_sample>       0 = use the full training set as queries
  */
 
@@ -106,21 +109,8 @@ static std::vector<int8_t> load_dataset_i8(H5::H5File& file, const std::string& 
         printf("\r    %10zu/%d", (size_t)(off + rows), N);
         fflush(stdout);
     }
-    printf("\r    done  (%.2f GB)\n", (out.size()) / 1e9);
-    return out;
-}
-
-// Ground truth: any integer dtype in the file is fine, HDF5 converts to int32.
-static std::vector<int> load_gt(H5::H5File& file, const std::string& path, int& N, int& K) {
-    H5::DataSet ds = file.openDataSet(path);
-    H5::DataSpace fsp = ds.getSpace();
-    hsize_t dims[2];
-    if (fsp.getSimpleExtentNdims() != 2 || fsp.getSimpleExtentDims(dims) < 0)
-        throw std::runtime_error("GT dataset '" + path + "' is not 2-D");
-    N = (int)dims[0]; K = (int)dims[1];
-    std::vector<int> out((size_t)N * K);
-    ds.read(out.data(), H5::PredType::NATIVE_INT);
-    printf("  loaded GT '%s'  (%d x %d)\n", path.c_str(), N, K);
+    printf("    done  (%.2f GB)\n", (out.size()) / 1e9);
+    fflush(stdout);
     return out;
 }
 
@@ -202,9 +192,9 @@ static void resultH5(const std::vector<int>& knns, const std::vector<float>& dis
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    if (argc < 24) {
+    if (argc < 23) {
         fprintf(stderr,
-            "Usage: %s input.h5 train_dataset gt_path k output.h5 allknn_sample "
+            "Usage: %s input.h5 train_dataset k output.h5 allknn_sample "
             "bw max_degree alpha leaf_size min_leaf_size k_entry entry_sample "
             "hash_bits reservoir_cap num_replicas final_prune back_edge "
             "num_threads seed randomness coocked dataset_name "
@@ -214,30 +204,29 @@ int main(int argc, char** argv) {
 
     const std::string h5_path   = argv[1];
     const std::string train_ds  = argv[2];
-    const std::string gt_path   = argv[3];
-    const int   K           = std::stoi(argv[4]);
-    const char* output      = argv[5];
-    const long  ALLKNN_SAMP = std::stol(argv[6]);
-    const int   BW          = std::stoi(argv[7]);
-    const int   MAX_DEG     = std::stoi(argv[8]);
-    const float ALPHA       = std::stof(argv[9]);
-    const int   LEAF_SZ     = std::stoi(argv[10]);
-    const int   MIN_LEAF    = std::stoi(argv[11]);
-    const int   K_ENTRY     = std::stoi(argv[12]);
-    const int   ENT_SAMP    = std::stoi(argv[13]);
-    const int   HBITS       = std::stoi(argv[14]);
-    const int   RES_CAP     = std::stoi(argv[15]);
-    const int   REPLICAS    = std::stoi(argv[16]);
-    const bool  F_PRUNE     = std::stoi(argv[17]) != 0;
-    const bool  B_EDGE      = std::stoi(argv[18]) != 0;
-    const int   N_THREADS   = std::stoi(argv[19]);
-    const uint64_t SEED     = (uint64_t)std::stoull(argv[20]);
-    const bool  RAND        = std::stoi(argv[21]) != 0;
-    const bool  COOCKED     = std::stoi(argv[22]) != 0;
-    const std::string DATASET_NAME = argv[23];
+    const int   K           = std::stoi(argv[3]);
+    const char* output      = argv[4];
+    const long  ALLKNN_SAMP = std::stol(argv[5]);
+    const int   BW          = std::stoi(argv[6]);
+    const int   MAX_DEG     = std::stoi(argv[7]);
+    const float ALPHA       = std::stof(argv[8]);
+    const int   LEAF_SZ     = std::stoi(argv[9]);
+    const int   MIN_LEAF    = std::stoi(argv[10]);
+    const int   K_ENTRY     = std::stoi(argv[11]);
+    const int   ENT_SAMP    = std::stoi(argv[12]);
+    const int   HBITS       = std::stoi(argv[13]);
+    const int   RES_CAP     = std::stoi(argv[14]);
+    const int   REPLICAS    = std::stoi(argv[15]);
+    const bool  F_PRUNE     = std::stoi(argv[16]) != 0;
+    const bool  B_EDGE      = std::stoi(argv[17]) != 0;
+    const int   N_THREADS   = std::stoi(argv[18]);
+    const uint64_t SEED     = (uint64_t)std::stoull(argv[19]);
+    const bool  RAND        = std::stoi(argv[20]) != 0;
+    const bool  COOCKED     = std::stoi(argv[21]) != 0;
+    const std::string DATASET_NAME = argv[22];
 
     std::string save_idx, load_idx;
-    for (int i = 24; i < argc - 1; ++i) {
+    for (int i = 23; i < argc - 1; ++i) {
         if (!std::strcmp(argv[i], "--save-index")) save_idx = argv[++i];
         if (!std::strcmp(argv[i], "--load-index")) load_idx = argv[++i];
     }
@@ -256,25 +245,15 @@ int main(int argc, char** argv) {
     int Nt, D;
     std::vector<int8_t> train = load_dataset_i8(file, train_ds, Nt, D);
 
-    int Ngt, Kgt;
-    std::vector<int> gt = load_gt(file, gt_path, Ngt, Kgt);
-
-    if (Kgt < K) {
-        fprintf(stderr, "GT has only %d neighbours per row, need k=%d\n", Kgt, K);
-        return 1;
-    }
-
     // ── Query set: reuse the train buffer directly (no copy) for a full
     //    all-kNN run, or gather a small subset when sampling is requested.
     std::vector<int8_t> query_sample; // only populated when sampling
     const int8_t* query_ptr;
     int nq;
-    std::vector<int> gt_used; // GT rows aligned with the queries actually used
     if (ALLKNN_SAMP <= 0 || ALLKNN_SAMP >= Nt) {
         printf("  allknn: full run (%d queries, reusing train buffer)\n", Nt);
         query_ptr = train.data();
         nq = Nt;
-        gt_used = gt; // already aligned 1:1 with train rows
     } else {
         printf("  allknn: sampling %ld/%d train vectors\n", ALLKNN_SAMP, Nt);
         std::mt19937_64 rng(42);
@@ -286,12 +265,9 @@ int main(int argc, char** argv) {
 
         nq = (int)ALLKNN_SAMP;
         query_sample.resize((size_t)nq * D);
-        gt_used.resize((size_t)nq * Kgt);
         for (int i = 0; i < nq; ++i) {
             std::memcpy(query_sample.data() + (size_t)i * D,
                         train.data() + (size_t)idx[i] * D, D);
-            std::memcpy(gt_used.data() + (size_t)i * Kgt,
-                        gt.data() + (size_t)idx[i] * Kgt, Kgt * sizeof(int));
         }
         query_ptr = query_sample.data();
     }
@@ -344,26 +320,18 @@ int main(int argc, char** argv) {
     }
 
     // ── Query (single call — fixes the old chunked-write bug) ─────────────
-    printf("\n-- allknn (%d queries, recall@%d) ----\n", nq, K);
+    printf("\n-- allknn (%d queries, k=%d) ----\n", nq, K);
     std::vector<pipnn::id_t> ids;
     std::vector<float> scores;
     auto t = clk::now();
     idx.query_i8(query_ptr, nq, K, ids, scores, BW);
     double query_s = sec(t);
+    printf("  bw=%-6d  qps=%.0f\n", BW, nq / query_s);
 
-    long total_hits = 0;
-    for (int qi = 0; qi < nq; ++qi) {
-        const pipnn::id_t* r = ids.data() + (size_t)qi * K;
-        const int* g = gt_used.data() + (size_t)qi * Kgt;
-        for (int i = 0; i < K; ++i)
-            for (int j = 0; j < K; ++j)
-                if ((int)r[i] + 1 == g[j]) { ++total_hits; break; }
-    }
-    double rec = (double)total_hits / (double)((long long)nq * K);
-    printf("  %-6d  %.4f     %.0f\n", BW, rec, nq / query_s);
-
-    // Convert ids to 1-based for the output file (matches GT convention),
-    // over the FULL result buffer (nq*K), not a hardcoded chunk size.
+    // Convert ids to 1-based for the output file (a common ground-truth
+    // convention), over the FULL result buffer (nq*K), not a hardcoded
+    // chunk size. Recall is computed externally against this file, so
+    // nothing here needs to know the ground truth.
     std::vector<int> ids_out(ids.size());
     for (size_t i = 0; i < ids.size(); ++i)
         ids_out[i] = (ids[i] == pipnn::NO_ID) ? 0 : (int)ids[i] + 1;
