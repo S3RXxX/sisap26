@@ -1,8 +1,19 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.yml – PiPNN SISAP 2026 Benchmark
 #
-# HOW TO BUILD + RUN:
-#   docker compose up --build
+# HOW TO BUILD:
+#   docker compose build
+#
+# HOW TO RUN:
+#   Edit the `command:` below to point at your dataset (or override it
+#   inline), then:
+#     docker compose run --rm pipnn-sisap
+#
+#   e.g. for a one-off dataset without editing the file:
+#     docker compose run --rm pipnn-sisap \
+#       --input /data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5 \
+#       --task-description /data/wikipedia-small/config.json \
+#       --output /output
 #
 # HOW TO OVERRIDE HYPERPARAMETERS (no need to edit this file):
 #   Create a ".env" file next to this one, e.g.:
@@ -11,30 +22,15 @@
 #     HOST_MEMORY_LIMIT=24g
 #   docker compose reads .env automatically.
 #
-#   Or override on the command line for a one-off run:
-#     BEAM_WIDTH=256 docker compose up --build
-#
-# DATA LAYOUT EXPECTED (same as `docker run -v $(pwd)/data:/data`):
+# DATA LAYOUT EXPECTED:
 #   ./data/<dataset-name>/<file>.h5   -> mounted read-only at /data/<dataset-name>/...
 #   ./data/<dataset-name>/config.json
-#   ./output/...                       -> mounted at /tira-data/output (results land here)
+#   ./output/...                       -> mounted at /output (results.h5 lands here)
 #
-# e.g. for the wikipedia-small dataset:
-#   ./data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5
-#   ./data/wikipedia-small/config.json
-# and config_pipnn.json (baked into the image) pointing at:
-#   {"input": "wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5",
-#    "task_description": "wikipedia-small/config.json"}
-#
-# Results are written with a unique, per-hyperparameter filename by default:
-#   ./output/results/<task>/PiPNN_bw<BEAM_WIDTH>_deg<MAX_DEGREE>_ef<ENTRY_SAMPLE>.h5
-# Set OUTPUT_PATH in .env to force one exact fixed path instead.
-#
-# If "docker compose up" reports it can't find your HDF5/config file, check:
-#   1. That config_pipnn.json's "input"/"task_description" paths are correct
-#      relative to whatever you have under ./data (entrypoint.sh resolves
-#      any non-absolute path against /data automatically).
-#   2. That ./data actually contains the files at that relative path.
+# This mirrors exactly what TIRA does at evaluation time — it substitutes
+# $inputDataset (a directory with the .h5 + config.json) and $outputDir
+# into the same --input/--task-description/--output flags. See the
+# Dockerfile header for the full tira-cli code-submission example.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -44,8 +40,8 @@ services:
     container_name: pipnn-sisap
 
     volumes:
-      - ./data:/data
-      - ./output:/tira-data/output
+      - ./data:/data:ro
+      - ./output:/output
 
     # Hard, Docker-enforced memory cap (OOM-killed if exceeded). Keep this
     # comfortably above MEMORY_LIMIT_GB below, which is a *soft* in-process
@@ -78,8 +74,21 @@ services:
       OMP_NUM_THREADS: ${OMP_NUM_THREADS:-0}
       MEMORY_LIMIT_GB: ${MEMORY_LIMIT_GB:-20}
 
-      # Output: leave OUTPUT_PATH empty (default) for an auto-generated,
-      # per-hyperparameter filename under OUTPUT_BASE_DIR; set OUTPUT_PATH
-      # in .env to force one exact fixed path instead.
-      OUTPUT_BASE_DIR: /tira-data/output
-      OUTPUT_PATH: ${OUTPUT_PATH:-}
+    # Adjust the paths below to match whatever's under ./data. This is
+    # exactly the command TIRA's --command template resolves to once
+    # $inputDataset/$outputDir are substituted.
+    # command:
+    #   - --input
+    #   - /data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5
+    #   - --task-description
+    #   - /data/wikipedia-small/config.json
+    #   - --output
+    #   - /output
+    
+    command:
+      - --input
+      - /data/wikipedia/benchmark-dev-wikipedia-bge-m3.h5
+      - --task-description
+      - /data/wikipedia/config.json
+      - --output
+      - /output

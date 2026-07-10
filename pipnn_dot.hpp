@@ -636,8 +636,6 @@ private:
 
         std::vector<std::vector<std::pair<dist_t,id_t>>> cands(n);
         std::mt19937_64 rng(cfg_.seed);
-        printf("PiPNN 1\n");
-        fflush(stdout);
 
         for(int rep=0;rep<cfg_.num_replicas;++rep){
             std::vector<id_t> all(n); std::iota(all.begin(),all.end(),0);
@@ -649,14 +647,17 @@ private:
             printf("Elapsed time: %ld ms\n", duration.count());
             printf("max depth: %i\n", max_depth);
             fflush(stdout);
-            printf("max depth: %i\n", max_depth);
             int nl=(int)leaves.size();
 
-            using E4=std::tuple<id_t,id_t,dist_t,dist_t>;
-            std::vector<std::vector<E4>> leaf_edges(nl);
+            using E3=std::tuple<id_t,id_t,dist_t>; // (s, t, dist) — dist is
+            // the same value for both directions (build_dist is symmetric),
+            // so there's no need for the separate forward/backward fields
+            // the old dense-matrix version carried; that alone drops this
+            // buffer's footprint by 25% (16B -> 12B per edge).
+            std::vector<std::vector<E3>> leaf_edges(nl);
             printf("PiPNN 2\n");
             fflush(stdout);
-
+            auto start_3 = std::chrono::high_resolution_clock::now();
 #pragma omp parallel for schedule(dynamic,1)
             for(int li=0;li<nl;++li){
                 const Leaf&leaf=leaves[li]; int ln=(int)leaf.size(); if(ln<2)continue;
@@ -706,18 +707,36 @@ private:
                     for(int ki=0;ki<k2;++ki){
                         if(ri[ki]==(id_t)-1) continue; // fewer than k2 neighbours available
                         int j=(int)ri[ki];
-                        // symmetric distance, so the forward and reverse
-                        // edge weight are the same value
-                        elist.emplace_back(leaf[i],leaf[j],rd[ki],rd[ki]);
+                        elist.emplace_back(leaf[i],leaf[j],rd[ki]);
                     }
                 }
             }
+            auto end_3 = std::chrono::high_resolution_clock::now();
+            auto duration_3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_3 - start_3);
+            printf("Elapsed time: %ld ms\n", duration_3.count());
             printf("PiPNN 3\n");
             fflush(stdout);
-            for(int li=0;li<nl;++li)
-                for(auto&[s,t,df,db]:leaf_edges[li]){
-                    cands[s].emplace_back(df,t); cands[t].emplace_back(db,s);
+            // Merge each leaf's edges into `cands`, then immediately free
+            // that leaf's buffer rather than waiting for the whole
+            // leaf_edges vector-of-vectors to go out of scope at the end of
+            // this replica. Without this, every leaf's edge list AND the
+            // (simultaneously growing) `cands` structure are alive at their
+            // peak size at the same time — this way memory freed on one
+            // side roughly offsets memory growing on the other, so the
+            // peak for this section is ~halved instead of doubled.
+            //
+            // Note: this merge must stay single-threaded. Leaves overlap —
+            // rbc_recurse() can route a point into more than one leaf when
+            // fanout>1 (the top/second recursion levels) — so a point's
+            // cands[] entry can be touched by edges from different leaves,
+            // and concurrently emplace_back-ing into the same cands[i] from
+            // multiple threads would be a data race.
+            for(int li=0;li<nl;++li){
+                for(auto&[s,t,dist]:leaf_edges[li]){
+                    cands[s].emplace_back(dist,t); cands[t].emplace_back(dist,s);
                 }
+                std::vector<E3>().swap(leaf_edges[li]);
+            }
             printf("PiPNN 4\n");
             fflush(stdout);
         }
@@ -734,7 +753,7 @@ private:
             }
         }
         printf("PiPNN 5\n");
-        fflush(stdout);  
+        fflush(stdout);
         {decltype(cands)().swap(cands);}
         {std::vector<float>().swap(sketches_);}
 
@@ -763,7 +782,6 @@ private:
         if(cfg_.back_edge) back_edge_pass(g_, dv, n, cfg_.alpha);
 
         entries_=diverse_entries(dv, n, cfg_.k_entry, cfg_.entry_sample, cfg_.seed);
-
         printf("PiPNN extras done\n");
         fflush(stdout);
     }

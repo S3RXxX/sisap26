@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# sisap_bench  –  the executable path to use in a TIRA submission's --command
+#
+#   tira-cli code-submission \
+#       --path . \
+#       --command '/app/sisap_bench --input $inputDataset/*.h5 --task-description $inputDataset/config.json --output $outputDir' \
+#       --task sisap-2026 \
+#       --dataset task-1-spot-check-20260602-training
+#
+# This is a thin wrapper, not the compiled program itself: it (re)compiles
+# sisap_bench.cpp with -march=native for whatever host is ACTUALLY running
+# the container (the machine `docker build` ran on may well differ from the
+# machine TIRA schedules the evaluation on, so baking -march=native in at
+# image-build time could crash with an illegal-instruction fault; compiling
+# here, at first invocation on the real execution host, avoids that). The
+# compiled binary is cached under SISAP_BUILD_CACHE so repeat invocations in
+# the same container don't pay the (~1-3s) compile cost again.
+#
+# All PiPNN hyperparameters (BEAM_WIDTH, MAX_DEGREE, ...) are read directly
+# from the environment by the compiled binary — see the Dockerfile for the
+# full list and defaults. This script only forwards whatever CLI args it
+# was given (--input/--task-description/--output/...) straight through.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_DIR="${SISAP_BUILD_CACHE:-/tmp/sisap_work}"
+BIN="${CACHE_DIR}/sisap_bench_native"
+
+mkdir -p "${CACHE_DIR}"
+
+if [ ! -x "${BIN}" ] || [ "${SRC_DIR}/sisap_bench.cpp" -nt "${BIN}" ] || [ "${SRC_DIR}/pipnn_dot.hpp" -nt "${BIN}" ]; then
+    echo "Compiling sisap_bench for this host (-march=native) ..." >&2
+    g++ -O3 -std=c++17 -fopenmp -I"${SRC_DIR}" "${SRC_DIR}/sisap_bench.cpp" \
+        -I/usr/include/hdf5/serial \
+        -L/usr/lib/x86_64-linux-gnu/hdf5/serial \
+        -lhdf5_cpp -lhdf5 -march=native -o "${BIN}"
+fi
+
+# Docker's `ENV OMP_NUM_THREADS=0` is meant as "let OpenMP pick all cores",
+# but libgomp treats a literal "0" as an invalid explicit value and aborts
+# with "Invalid value for environment variable OMP_NUM_THREADS: 0" instead
+# of falling back to all cores. Unset it in that case so libgomp picks its
+# own default instead.
+if [ "${OMP_NUM_THREADS:-0}" = "0" ]; then
+    unset OMP_NUM_THREADS
+fi
+
+# Optional soft RAM limit (0/unset = unlimited)
+if [ "${MEMORY_LIMIT_GB:-0}" -gt 0 ] 2>/dev/null; then
+    ulimit -v $(( MEMORY_LIMIT_GB * 1024 * 1024 )) || echo "Warning: ulimit -v not supported; ignoring." >&2
+fi
+
+exec "${BIN}" "$@"

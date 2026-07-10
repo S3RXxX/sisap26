@@ -1,50 +1,47 @@
 /**
  * sisap_bench.cpp  –  PiPNN SISAP 2026 benchmark, pure C++ pipeline.
  *
- * This replaces the old run_sisap2026.py + sisap_bench.cpp pair with a
- * single C++ program. Rationale for the rewrite (see chat for the full
- * write-up):
+ * TIRA-compatible CLI: this binary is invoked directly (no wrapper script)
+ * as
+ *   sisap_bench --input <dataset.h5> --task-description <config.json> \
+ *               --output <output.h5 or output dir>
  *
- *   1. "Query count mismatch 10000 vs. 200000" was caused by a bug in the
- *      old run_split(): IndexDot::query() re-assigns its output vectors on
- *      every call, so after chunking queries in batches of 10000 the `ids`/
- *      `scores` vectors held only the *last* chunk, and the H5 writer was
- *      told n=10000 (the chunk size) instead of the true query count. Fixed
- *      here by running every query in a single call and writing exactly
- *      that many rows.
+ * matching the `tira-cli code-submission --command '{EXE} --input
+ * $inputDataset/[star].h5 --task-description $inputDataset/config.json
+ * --output $outputDir'` convention (written as [star] here only to avoid
+ * confusing the C comment parser — use a literal * in the actual command):
+ * TIRA supplies the dataset/task-description paths and output location at
+ * *run* time, so nothing about the dataset is baked into the image — no
+ * more local config_pipnn.json indirection.
  *
- *   2. The OOM/SIGKILL on the dev/test datasets came from doubling the
- *      resident data: the old pipeline wrote a full second copy of the
- *      training set to serve as the "allknn" query set, then loaded THAT
- *      copy fully into RAM as float32 (4x its int8 size) just to hand it to
- *      IndexDot::query(). For the full wikipedia dataset that is an extra
- *      ~3.6M x 1024 x 4 bytes ≈ 14.7 GB on top of everything else. This
- *      version never makes a query copy for the all-kNN case: it queries
- *      directly off the same int8 buffer used to build the index via
- *      IndexDot::query_i8(), decoding one row at a time into a small
- *      thread-local scratch buffer.
+ * All PiPNN hyperparameters (BEAM_WIDTH, MAX_DEGREE, ...) are read straight
+ * from environment variables (see the Dockerfile ENV defaults), since
+ * TIRA's fixed --command template has no room for a hyperparameter sweep of
+ * CLI flags — that's exactly what Docker ENV defaults (baked in at build
+ * time, or overridden per-run with `docker run -e VAR=value`) are for.
  *
- *   3. No Python step: this program reads the HDF5 file directly (train
- *      vectors) and quantises straight to int8 while streaming it in,
- *      instead of shelling out to a Python export script. Per the task, the
- *      input embeddings are already L2-normalised, so there is no
- *      normalisation pass here — just round(v*127) clipped to [-127,127].
+ * Design notes carried over from earlier fixes (see chat history):
+ *
+ *   1. Queries run in a single call (not chunked), so the H5 writer is
+ *      always given the true query count — fixes the old "query count
+ *      mismatch" bug.
+ *
+ *   2. The all-kNN query set reuses the same int8 buffer used to build the
+ *      index (via IndexDot::query_i8()) instead of materialising a second
+ *      float32 copy of the training set — avoids ~4x the training set's
+ *      size in extra RAM.
+ *
+ *   3. No Python: this program reads the HDF5 file directly and quantises
+ *      straight to int8 while streaming it in. The task's embeddings are
+ *      already L2-normalised, so there's no normalisation pass — just
+ *      round(v*127) clipped to [-127,127].
  *
  *   4. No ground truth is loaded and no recall is computed here — that's
- *      done externally against the output results.h5, so this program only
- *      needs the training vectors, never the (potentially large) GT array.
+ *      done externally against the output file.
  *
- * Usage:
- *   ./sisap_bench <input.h5> <train_dataset_name> <k> \
- *                 <output.h5> <allknn_sample> <bw> <max_degree> <alpha> \
- *                 <leaf_size> <min_leaf_size> <k_entry> <entry_sample> \
- *                 <hash_bits> <reservoir_cap> <num_replicas> <final_prune> \
- *                 <back_edge> <num_threads> <seed> <randomness> <coocked> \
- *                 <dataset_name> \
- *                 [--save-index PATH] [--load-index PATH]
- *
- *   <train_dataset_name>  e.g. "train"          (config.json "data")
- *   <allknn_sample>       0 = use the full training set as queries
+ *   5. Per-leaf graph construction uses a bounded top-k accumulator instead
+ *      of a dense O(leaf_size^2) distance matrix — see IndexDot::build_impl
+ *      in pipnn_dot.hpp.
  */
 
 #include "pipnn_dot.hpp"
@@ -52,8 +49,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -62,9 +62,98 @@
 #include <vector>
 #include <H5Cpp.h>
 
+namespace fs = std::filesystem;
+
 using clk = std::chrono::steady_clock;
 static double sec(clk::time_point t) {
     return std::chrono::duration<double>(clk::now() - t).count();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment variable helpers (hyperparameters come from Docker ENV, not
+// argv — TIRA's --command only ever passes --input/--task-description/
+// --output).
+// ─────────────────────────────────────────────────────────────────────────────
+static int env_int(const char* name, int def) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::atoi(v) : def;
+}
+static long env_long(const char* name, long def) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::atol(v) : def;
+}
+static float env_float(const char* name, float def) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::atof(v) : def;
+}
+static uint64_t env_u64(const char* name, uint64_t def) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? (uint64_t)std::stoull(v) : def;
+}
+static bool env_bool(const char* name, bool def) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? (std::atoi(v) != 0) : def;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimal parser for a FLAT json object of string/number/bool values, e.g.
+//   {"k": 16, "data": "train", "dataset_name": "wikipedia-small"}
+// This is all config.json ever contains (no more gt_I, so no arrays needed),
+// so a hand-rolled parser avoids pulling in a JSON dependency.
+// ─────────────────────────────────────────────────────────────────────────────
+static std::map<std::string, std::string> parse_flat_json(const std::string& text) {
+    std::map<std::string, std::string> kv;
+    size_t i = 0, n = text.size();
+    auto skip_ws = [&] { while (i < n && std::isspace((unsigned char)text[i])) ++i; };
+    auto parse_string = [&]() -> std::string {
+        ++i; // opening quote
+        std::string s;
+        while (i < n && text[i] != '"') {
+            if (text[i] == '\\' && i + 1 < n) { s += text[i + 1]; i += 2; }
+            else { s += text[i]; ++i; }
+        }
+        if (i < n) ++i; // closing quote
+        return s;
+    };
+    skip_ws();
+    if (i < n && text[i] == '{') ++i;
+    while (i < n) {
+        skip_ws();
+        if (i >= n || text[i] == '}') break;
+        if (text[i] != '"') { ++i; continue; }
+        std::string key = parse_string();
+        skip_ws();
+        if (i < n && text[i] == ':') ++i;
+        skip_ws();
+        std::string value;
+        if (i < n && text[i] == '"') {
+            value = parse_string();
+        } else {
+            size_t start = i;
+            int depth = 0;
+            while (i < n) {
+                char c = text[i];
+                if (c == '[' || c == '{') ++depth;
+                else if (c == ']' || c == '}') { if (depth == 0) break; --depth; }
+                else if (c == ',' && depth == 0) break;
+                ++i;
+            }
+            value = text.substr(start, i - start);
+            while (!value.empty() && std::isspace((unsigned char)value.back())) value.pop_back();
+        }
+        kv[key] = value;
+        skip_ws();
+        if (i < n && text[i] == ',') ++i;
+    }
+    return kv;
+}
+
+static std::string read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open file: " + path);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,8 +198,7 @@ static std::vector<int8_t> load_dataset_i8(H5::H5File& file, const std::string& 
         printf("\r    %10zu/%d", (size_t)(off + rows), N);
         fflush(stdout);
     }
-    printf("    done  (%.2f GB)\n", (out.size()) / 1e9);
-    fflush(stdout);
+    printf("\r    done  (%.2f GB)\n", (out.size()) / 1e9);
     return out;
 }
 
@@ -119,7 +207,8 @@ static std::vector<int8_t> load_dataset_i8(H5::H5File& file, const std::string& 
 // ─────────────────────────────────────────────────────────────────────────────
 static void resultH5(const std::vector<int>& knns, const std::vector<float>& dists,
                       int k, int n, double buildT, double preproT, double queryT,
-                      pipnn::Config cfg, const std::string& dataset_name, const char* output) {
+                      pipnn::Config cfg, const std::string& dataset_name,
+                      const std::string& task_name, const std::string& output) {
     H5::H5File file(output, H5F_ACC_TRUNC);
 
     hsize_t dims[2] = {static_cast<hsize_t>(n), static_cast<hsize_t>(k)};
@@ -141,8 +230,7 @@ static void resultH5(const std::vector<int>& knns, const std::vector<float>& dis
     }
     {
         H5::Attribute attr = file.createAttribute("task", strdatatype, scalarSpace);
-        std::string value = "task1";
-        attr.write(strdatatype, value);
+        attr.write(strdatatype, task_name);
     }
     // Which dataset this result was produced against — mirrors the key
     // eval.py's _discover_datasets() uses: cfg.get("dataset_name",
@@ -188,48 +276,90 @@ static void resultH5(const std::vector<int>& knns, const std::vector<float>& dis
     file.close();
 }
 
+static void print_usage() {
+    fprintf(stderr,
+        "Usage: sisap_bench --input <dataset.h5> --task-description <config.json> "
+        "--output <output.h5 or dir>\n"
+        "                 [--allknn-sample N] [--dataset-name NAME]\n"
+        "                 [--save-index PATH] [--load-index PATH]\n\n"
+        "All PiPNN hyperparameters (BEAM_WIDTH, MAX_DEGREE, ALPHA, ...) are "
+        "read from environment variables — see the Dockerfile for the full "
+        "list and defaults.\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    if (argc < 23) {
-        fprintf(stderr,
-            "Usage: %s input.h5 train_dataset k output.h5 allknn_sample "
-            "bw max_degree alpha leaf_size min_leaf_size k_entry entry_sample "
-            "hash_bits reservoir_cap num_replicas final_prune back_edge "
-            "num_threads seed randomness coocked dataset_name "
-            "[--save-index PATH] [--load-index PATH]\n", argv[0]);
+    std::string input_h5, task_desc, output_arg, save_idx, load_idx, dataset_name_override;
+    long allknn_sample_override = -1; // -1 = "not given on the CLI, use env/default"
+
+    for (int i = 1; i < argc; ++i) {
+        auto next = [&](const char* flag) -> std::string {
+            if (i + 1 >= argc) { fprintf(stderr, "%s requires a value\n", flag); exit(1); }
+            return argv[++i];
+        };
+        std::string a = argv[i];
+        if      (a == "--input")           input_h5 = next("--input");
+        else if (a == "--task-description") task_desc = next("--task-description");
+        else if (a == "--output")          output_arg = next("--output");
+        else if (a == "--allknn-sample")   allknn_sample_override = std::stol(next("--allknn-sample"));
+        else if (a == "--dataset-name")    dataset_name_override = next("--dataset-name");
+        else if (a == "--save-index")      save_idx = next("--save-index");
+        else if (a == "--load-index")      load_idx = next("--load-index");
+        else if (a == "-h" || a == "--help") { print_usage(); return 0; }
+        else { fprintf(stderr, "Unknown argument: %s\n", a.c_str()); print_usage(); return 1; }
+    }
+    if (input_h5.empty() || task_desc.empty() || output_arg.empty()) {
+        print_usage();
         return 1;
     }
 
-    const std::string h5_path   = argv[1];
-    const std::string train_ds  = argv[2];
-    const int   K           = std::stoi(argv[3]);
-    const char* output      = argv[4];
-    const long  ALLKNN_SAMP = std::stol(argv[5]);
-    const int   BW          = std::stoi(argv[6]);
-    const int   MAX_DEG     = std::stoi(argv[7]);
-    const float ALPHA       = std::stof(argv[8]);
-    const int   LEAF_SZ     = std::stoi(argv[9]);
-    const int   MIN_LEAF    = std::stoi(argv[10]);
-    const int   K_ENTRY     = std::stoi(argv[11]);
-    const int   ENT_SAMP    = std::stoi(argv[12]);
-    const int   HBITS       = std::stoi(argv[13]);
-    const int   RES_CAP     = std::stoi(argv[14]);
-    const int   REPLICAS    = std::stoi(argv[15]);
-    const bool  F_PRUNE     = std::stoi(argv[16]) != 0;
-    const bool  B_EDGE      = std::stoi(argv[17]) != 0;
-    const int   N_THREADS   = std::stoi(argv[18]);
-    const uint64_t SEED     = (uint64_t)std::stoull(argv[19]);
-    const bool  RAND        = std::stoi(argv[20]) != 0;
-    const bool  COOCKED     = std::stoi(argv[21]) != 0;
-    const std::string DATASET_NAME = argv[22];
+    // ── Parse the task's config.json ({"k":16,"data":"train",...}) ────────
+    auto cfg_kv = parse_flat_json(read_file(task_desc));
+    if (!cfg_kv.count("k"))    { fprintf(stderr, "config.json missing 'k'\n"); return 1; }
+    if (!cfg_kv.count("data")) { fprintf(stderr, "config.json missing 'data'\n"); return 1; }
+    const int K = std::stoi(cfg_kv["k"]);
+    const std::string train_ds = cfg_kv["data"];
 
-    std::string save_idx, load_idx;
-    for (int i = 23; i < argc - 1; ++i) {
-        if (!std::strcmp(argv[i], "--save-index")) save_idx = argv[++i];
-        if (!std::strcmp(argv[i], "--load-index")) load_idx = argv[++i];
-    }
+    // dataset_name: --dataset-name flag > config.json's "dataset_name" >
+    // the name of the folder config.json lives in (mirrors eval.py's
+    // _discover_datasets(): cfg.get("dataset_name", Path(cfg_path).parent.name))
+    std::string dataset_name = !dataset_name_override.empty() ? dataset_name_override
+                              : cfg_kv.count("dataset_name") ? cfg_kv["dataset_name"]
+                              : fs::path(task_desc).parent_path().filename().string();
+    std::string task_name = cfg_kv.count("task") ? cfg_kv["task"] : "task1";
+
+    // ── Resolve output path: a directory (existing, or given with a
+    //    trailing slash) gets "results.h5" appended; anything else is used
+    //    as an exact file path. Parent directories are created either way.
+    fs::path output_path(output_arg);
+    bool looks_like_dir = output_arg.back() == '/' || output_arg.back() == '\\'
+                          || (fs::exists(output_path) && fs::is_directory(output_path));
+    if (looks_like_dir) output_path /= "results.h5";
+    if (!output_path.parent_path().empty())
+        fs::create_directories(output_path.parent_path());
+    const std::string output = output_path.string();
+
+    // ── Hyperparameters from environment (Docker ENV defaults / -e overrides) ──
+    const long  ALLKNN_SAMP = allknn_sample_override >= 0 ? allknn_sample_override
+                                                           : env_long("ALLKNN_SAMPLE", 0);
+    const int   BW          = env_int("BEAM_WIDTH", 32);
+    const int   MAX_DEG     = env_int("MAX_DEGREE", 64);
+    const float ALPHA       = env_float("ALPHA", 1.2f);
+    const int   LEAF_SZ     = env_int("LEAF_SIZE", 512);
+    const int   MIN_LEAF    = env_int("MIN_LEAF_SIZE", 32);
+    const int   K_ENTRY     = env_int("K_ENTRY", 12);
+    const int   ENT_SAMP    = env_int("ENTRY_SAMPLE", 3000);
+    const int   HBITS       = env_int("HASH_BITS", 12);
+    const int   RES_CAP     = env_int("RESERVOIR_CAP", 128);
+    const int   REPLICAS    = env_int("NUM_REPLICAS", 1);
+    const bool  F_PRUNE     = env_bool("FINAL_PRUNE", false);
+    const bool  B_EDGE      = env_bool("BACK_EDGE", false);
+    const int   N_THREADS   = env_int("NUM_THREADS", 0);
+    const uint64_t SEED     = env_u64("SEED", 42);
+    const bool  RAND        = env_bool("RAND", false);
+    const bool  COOCKED     = env_bool("COOCKED", false);
 
 #if PIPNN_AVX2
     printf("AVX2+FMA  enabled\n");
@@ -237,10 +367,17 @@ int main(int argc, char** argv) {
     printf("AVX2      disabled\n");
 #endif
 
+    printf("input             = %s\n", input_h5.c_str());
+    printf("task_description  = %s\n", task_desc.c_str());
+    printf("output            = %s\n", output.c_str());
+    printf("dataset_name      = %s\n", dataset_name.c_str());
+    printf("task              = %s\n", task_name.c_str());
+    printf("k                 = %d\n\n", K);
+
     auto t_prepro = clk::now();
 
-    printf("Opening %s ...\n", h5_path.c_str());
-    H5::H5File file(h5_path, H5F_ACC_RDONLY);
+    printf("Opening %s ...\n", input_h5.c_str());
+    H5::H5File file(input_h5, H5F_ACC_RDONLY);
 
     int Nt, D;
     std::vector<int8_t> train = load_dataset_i8(file, train_ds, Nt, D);
@@ -319,7 +456,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ── Query (single call — fixes the old chunked-write bug) ─────────────
+    // ── Query (single call — every query in one shot, so the result file
+    //    always gets the true query count) ──────────────────────────────
     printf("\n-- allknn (%d queries, k=%d) ----\n", nq, K);
     std::vector<pipnn::id_t> ids;
     std::vector<float> scores;
@@ -329,15 +467,15 @@ int main(int argc, char** argv) {
     printf("  bw=%-6d  qps=%.0f\n", BW, nq / query_s);
 
     // Convert ids to 1-based for the output file (a common ground-truth
-    // convention), over the FULL result buffer (nq*K), not a hardcoded
-    // chunk size. Recall is computed externally against this file, so
+    // convention). Recall is computed externally against this file, so
     // nothing here needs to know the ground truth.
     std::vector<int> ids_out(ids.size());
     for (size_t i = 0; i < ids.size(); ++i)
         ids_out[i] = (ids[i] == pipnn::NO_ID) ? 0 : (int)ids[i] + 1;
 
-    resultH5(ids_out, scores, K, nq, build_s, prepro_s, query_s, cfg, DATASET_NAME, output);
+    resultH5(ids_out, scores, K, nq, build_s, prepro_s, query_s, cfg,
+              dataset_name, task_name, output);
 
-    printf("\nDone.\n");
+    printf("\nDone. Wrote %s\n", output.c_str());
     return 0;
 }
