@@ -92,7 +92,7 @@ ENV BEAM_WIDTH=32
 
 # Graph build parameters
 # Max out-degree per node (R). Higher → better recall, more memory
-ENV MAX_DEGREE=64
+ENV MAX_DEGREE=32
 # RobustPrune directional factor. Range [1.0, 2.0]
 ENV ALPHA=1.2
 # Max points per leaf cluster (Cmax)
@@ -105,8 +105,16 @@ ENV K_ENTRY=12
 ENV ENTRY_SAMPLE=3000
 # LSH bits for HashPrune (≤ 16)
 ENV HASH_BITS=12
-# HashPrune reservoir size (lmax)
-ENV RESERVOIR_CAP=128
+# HashPrune reservoir size (lmax). IMPORTANT: this is allocated at its full
+# size for EVERY point right at the start of the build (n * RESERVOIR_CAP *
+# 10 bytes), not something that grows gradually — for a multi-million-point
+# dataset this is very likely the single largest structure in the whole
+# pipeline, often bigger than the (int8-quantized) dataset itself. e.g. at
+# n=6.5M: RESERVOIR_CAP=128 -> ~8.3GB just for this array. If you're hitting
+# OOM on a large dataset, lowering this is the single most direct lever —
+# it shrinks memory linearly and also speeds up graph construction (each
+# insert scans up to RESERVOIR_CAP existing entries).
+ENV RESERVOIR_CAP=32
 # Independent RBC graph replications (increases build time)
 ENV NUM_REPLICAS=1
 # Apply RobustPrune after HashPrune (0/1)

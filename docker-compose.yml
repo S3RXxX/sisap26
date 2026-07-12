@@ -53,17 +53,17 @@ services:
       BEAM_WIDTH: ${BEAM_WIDTH:-32}
 
       # Graph build parameters
-      MAX_DEGREE: ${MAX_DEGREE:-64}
+      MAX_DEGREE: ${MAX_DEGREE:-32}
       ALPHA: ${ALPHA:-1.2}
       LEAF_SIZE: ${LEAF_SIZE:-512}
       MIN_LEAF_SIZE: ${MIN_LEAF_SIZE:-32}
       K_ENTRY: ${K_ENTRY:-12}
       ENTRY_SAMPLE: ${ENTRY_SAMPLE:-3000}
       HASH_BITS: ${HASH_BITS:-12}
-      RESERVOIR_CAP: ${RESERVOIR_CAP:-128}
+      RESERVOIR_CAP: ${RESERVOIR_CAP:-32}
       NUM_REPLICAS: ${NUM_REPLICAS:-1}
-      FINAL_PRUNE: ${FINAL_PRUNE:-1}
-      BACK_EDGE: ${BACK_EDGE:-1}
+      FINAL_PRUNE: ${FINAL_PRUNE:-0}
+      BACK_EDGE: ${BACK_EDGE:-0}
       SEED: ${SEED:-42}
       RAND: ${RAND:-0}
       COOCKED: ${COOCKED:-0}

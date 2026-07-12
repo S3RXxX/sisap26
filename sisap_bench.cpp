@@ -319,7 +319,13 @@ int main(int argc, char** argv) {
     auto cfg_kv = parse_flat_json(read_file(task_desc));
     if (!cfg_kv.count("k"))    { fprintf(stderr, "config.json missing 'k'\n"); return 1; }
     if (!cfg_kv.count("data")) { fprintf(stderr, "config.json missing 'data'\n"); return 1; }
-    const int K = std::stoi(cfg_kv["k"]);
+    // Query/output k+1 neighbors, not k: the challenge's own eval script
+    // drops the nearest match before scoring (on an all-kNN run the query
+    // set IS the training set, so each point's own nearest "neighbor" is
+    // almost always itself; the eval script assumes rank-0 is that
+    // self-loop and trims it). Without the +1 here, that trim would leave
+    // only k-1 genuine neighbors for every point instead of k.
+    const int K = std::stoi(cfg_kv["k"]) + 1;
     const std::string train_ds = cfg_kv["data"];
 
     // dataset_name: --dataset-name flag > config.json's "dataset_name" >
@@ -372,7 +378,7 @@ int main(int argc, char** argv) {
     printf("output            = %s\n", output.c_str());
     printf("dataset_name      = %s\n", dataset_name.c_str());
     printf("task              = %s\n", task_name.c_str());
-    printf("k                 = %d\n\n", K);
+    printf("k (config+1)      = %d\n\n", K);
 
     auto t_prepro = clk::now();
 
@@ -446,7 +452,9 @@ int main(int argc, char** argv) {
         auto t = clk::now();
         idx.build_i8(train.data(), Nt);
         build_s = sec(t);
+        printf("PiPNN computing stats...\n"); fflush(stdout);
         auto st = idx.stats();
+        printf("PiPNN stats done\n"); fflush(stdout);
         printf("  Build time : %.2f s\n", build_s);
         printf("  Avg degree : %.1f\n", st.avg_deg);
         printf("  Bidir      : %.1f%%\n\n", 100.0 * st.frac_bidir);

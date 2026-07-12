@@ -18,13 +18,13 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <queue>
 #include <random>
 #include <string>
 #include <unordered_set>
 #include <vector>
-#include <chrono>
 #ifdef _OPENMP
 #  include <omp.h>
 #endif
@@ -58,6 +58,9 @@ struct Config {
     int      knn_k         = 2;
     int      hash_bits     = 12;
     int      reservoir_cap = 128;
+    // (max_candidates removed: there is no longer a separate `cands`
+    // structure to bound — edges stream straight into the fixed-size
+    // HashReservoirs, so reservoir_cap alone governs this stage's memory.)
     int      num_replicas  = 1;
     bool     final_prune   = true;
     bool     back_edge     = true;
@@ -227,21 +230,33 @@ static void robust_prune(id_t p,
 // HashPrune reservoir
 // ─────────────────────────────────────────────────────────────────────────────
 struct HashReservoir {
-    struct Slot { uint16_t hash; id_t id; dist_t dist; };
+    // Packed to remove the alignment padding a naive {hash,id,dist} layout
+    // would carry (uint16_t followed by a 4-byte field pads to 12B/slot;
+    // packed, this is 10B/slot — a free ~17% cut to what is, at scale, the
+    // single largest allocation in the whole build: n * reservoir_cap slots).
+    struct __attribute__((packed)) Slot { id_t id; dist_t dist; uint16_t hash; };
     int cap = 0, sz = 0;
     std::vector<Slot> buf;
     void init(int c) { cap = c; sz = 0; buf.resize(c); }
     void insert(uint16_t h, id_t id, dist_t d) {
         for (int i = 0; i < sz; ++i)
-            if (buf[i].hash == h) { if (d < buf[i].dist) buf[i]={h,id,d}; return; }
-        if (sz < cap) { buf[sz++] = {h,id,d}; return; }
+            if (buf[i].hash == h) { if (d < buf[i].dist) buf[i]=Slot{id,d,h}; return; }
+        if (sz < cap) { buf[sz++] = Slot{id,d,h}; return; }
         int fi = 0;
         for (int i = 1; i < sz; ++i) if (buf[i].dist > buf[fi].dist) fi = i;
-        if (d < buf[fi].dist) buf[fi] = {h,id,d};
+        if (d < buf[fi].dist) buf[fi] = Slot{id,d,h};
     }
     void flush(std::vector<std::pair<dist_t,id_t>>& o) const {
         o.clear(); for (int i = 0; i < sz; ++i) o.emplace_back(buf[i].dist, buf[i].id);
     }
+    // Release this reservoir's slot buffer as soon as it's been flushed —
+    // there are n of these, each reservoir_cap slots, so releasing them one
+    // at a time as the graph-build loop consumes each point (rather than
+    // waiting for the whole `res` vector to go out of scope after
+    // back_edge_pass has already allocated its own n-sized structure on
+    // top) is what actually keeps the peak down at multi-million-point
+    // scale.
+    void free_buf() { std::vector<Slot>().swap(buf); sz = 0; cap = 0; }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -594,11 +609,34 @@ public:
     const std::vector<id_t>& entry_points()const{return entries_;}
     struct Stats{double avg_deg,frac_bidir;};
     Stats stats()const{
-        size_t tot=0,bi=0;
-        std::vector<std::unordered_set<id_t>>sets(n_);
-        for(int i=0;i<n_;++i)for(id_t v:g_.get(i))sets[i].insert(v);
-        for(int u=0;u<n_;++u)for(id_t v:g_.get(u)){++tot;if(sets[v].count(u))++bi;}
-        return{(double)tot/n_,tot?(double)bi/tot:0.};
+        // Previously this built one std::unordered_set per point (n_ of
+        // them) just to answer "is u in v's neighbor list" in O(1). At
+        // millions of points that's not just n_ allocations — libstdc++'s
+        // unordered_set allocates each element as its own individually
+        // heap-allocated node, so a point with degree R contributes R more
+        // separate allocations on top of the set itself. For n=6.5M at
+        // R=64 that's on the order of 400M+ individual small allocations,
+        // purely to print two diagnostic numbers.
+        //
+        // g_ already stores each point's neighbors contiguously (FlatGraph
+        // is a flat array), so "is u in v's neighbor list" is answered by
+        // a direct linear scan over the (small, R-sized) row we already
+        // have — no extra memory at all, at the cost of O(R) instead of
+        // O(1) per check. Parallelized across points to offset that.
+        long long tot=0, bi=0;
+#pragma omp parallel for schedule(static) reduction(+:tot,bi)
+        for(int u=0;u<n_;++u){
+            int du=g_.degree(u);
+            const id_t* ru=g_.row(u);
+            for(int j=0;j<du;++j){
+                id_t v=ru[j];
+                ++tot;
+                int dv_=g_.degree(v);
+                const id_t* rv=g_.row(v);
+                for(int k=0;k<dv_;++k){ if(rv[k]==(id_t)u){ ++bi; break; } }
+            }
+        }
+        return{n_?(double)tot/n_:0.0, tot?(double)bi/(double)tot:0.};
     }
 
 private:
@@ -623,8 +661,6 @@ private:
 #ifdef _OPENMP
         if(cfg_.num_threads>0) omp_set_num_threads(cfg_.num_threads);
 #endif
-        printf("PiPNN 0\n");
-        fflush(stdout);
         lsh_.init(m,d,cfg_.seed);
         sketches_.resize((size_t)n*m);
 #pragma omp parallel for schedule(static)
@@ -634,156 +670,206 @@ private:
             lsh_.sketch(dv.row(i,buf.data()), sketches_.data()+(size_t)i*m);
         }
 
-        std::vector<std::vector<std::pair<dist_t,id_t>>> cands(n);
+        // Reservoirs are allocated once, up front, and streamed into
+        // directly as edges are produced by each batch below — there is no
+        // separate `cands` structure any more. Previously, `cands` (bounded
+        // to cand_cap entries/point) and `res` (reservoir_cap slots/point)
+        // were both fully alive at the same time right when res was being
+        // populated from cands. At millions of points, a "bounded" cands
+        // capped at e.g. 256 entries/point is still n*256*8B — for 6.5M
+        // points that's ~13GB by itself, on top of res's own
+        // n*reservoir_cap*10B. Not materialising cands at all, rather than
+        // just bounding it, is what actually keeps this within a normal
+        // machine's RAM at that scale — res's fixed n*reservoir_cap*10B is
+        // now the only n-sized structure this stage carries.
+        std::vector<HashReservoir> res(n);
+#pragma omp parallel for schedule(static)
+        for(int i=0;i<n;++i) res[i].init(cfg_.reservoir_cap);
+
         std::mt19937_64 rng(cfg_.seed);
+        printf("PiPNN 3\n"); fflush(stdout);
 
         for(int rep=0;rep<cfg_.num_replicas;++rep){
             std::vector<id_t> all(n); std::iota(all.begin(),all.end(),0);
             Partition leaves; leaves.reserve(n/std::max(cfg_.leaf_size,1)*2);
-            auto start_recur = std::chrono::high_resolution_clock::now();
             int max_depth =rbc_recurse(dv, all, cfg_, 0, rng, leaves);
-            auto end_recur = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_recur - start_recur);
-            printf("Elapsed time: %ld ms\n", duration.count());
             printf("max depth: %i\n", max_depth);
-            fflush(stdout);
             int nl=(int)leaves.size();
+            printf("nl = %d\n", nl); fflush(stdout);
 
             using E3=std::tuple<id_t,id_t,dist_t>; // (s, t, dist) — dist is
             // the same value for both directions (build_dist is symmetric),
             // so there's no need for the separate forward/backward fields
             // the old dense-matrix version carried; that alone drops this
             // buffer's footprint by 25% (16B -> 12B per edge).
-            std::vector<std::vector<E3>> leaf_edges(nl);
-            printf("PiPNN 2\n");
-            fflush(stdout);
-            auto start_3 = std::chrono::high_resolution_clock::now();
+
+            // Leaves are generated and merged in bounded-size batches, so
+            // at most BATCH_LEAVES leaves' worth of edges are ever resident
+            // at once instead of materialising every leaf's edges for the
+            // whole replica up front. rbc_recurse's fanout>1 overlap at the
+            // top/second recursion levels means nl can run into the
+            // millions (far more than n/leaf_size would suggest), so this
+            // bounds leaf_edges to a small, fixed size regardless of nl.
+            const int BATCH_LEAVES = 10000;
+            for(int start_li=0; start_li<nl; start_li+=BATCH_LEAVES){
+                int end_li = std::min(start_li+BATCH_LEAVES, nl);
+                int batch_n = end_li-start_li;
+                std::vector<std::vector<E3>> batch_edges(batch_n);
+
 #pragma omp parallel for schedule(dynamic,1)
-            for(int li=0;li<nl;++li){
-                const Leaf&leaf=leaves[li]; int ln=(int)leaf.size(); if(ln<2)continue;
-                static thread_local std::vector<float> ld;
-                ld.resize((size_t)ln*d);
-                for(int i=0;i<ln;++i) dv.pack(&leaf[i], 1, ld.data()+(size_t)i*d);
+                for(int li=start_li; li<end_li; ++li){
+                    int local_li = li-start_li;
+                    const Leaf&leaf=leaves[li]; int ln=(int)leaf.size(); if(ln<2)continue;
+                    static thread_local std::vector<float> ld;
+                    ld.resize((size_t)ln*d);
+                    for(int i=0;i<ln;++i) dv.pack(&leaf[i], 1, ld.data()+(size_t)i*d);
 
-                int k2=std::min(cfg_.knn_k,ln-1);
+                    int k2=std::min(cfg_.knn_k,ln-1);
 
-                // Bounded top-k2 accumulator per point, flattened to one
-                // buffer: ln*k2 slots instead of the old ln*ln dense
-                // distance matrix (plus its ln*d transpose scratch buffer).
-                // For leaf_size=1024, knn_k=2 that's a ~500x reduction in
-                // peak per-leaf memory (2 floats/ids per point instead of
-                // 1024), and this scratch is reused (thread_local) across
-                // leaves rather than freshly allocated each time.
-                static thread_local std::vector<dist_t> topk_d;
-                static thread_local std::vector<id_t>   topk_id;
-                topk_d.assign((size_t)ln*k2, INF_D);
-                topk_id.assign((size_t)ln*k2, (id_t)-1);
+                    // Bounded top-k2 accumulator per point, flattened to
+                    // one buffer: ln*k2 slots instead of the old ln*ln
+                    // dense distance matrix (plus its ln*d transpose
+                    // scratch buffer). For leaf_size=1024, knn_k=2 that's a
+                    // ~500x reduction in peak per-leaf memory (2 floats/ids
+                    // per point instead of 1024), and this scratch is
+                    // reused (thread_local) across leaves rather than
+                    // freshly allocated each time.
+                    static thread_local std::vector<dist_t> topk_d;
+                    static thread_local std::vector<id_t>   topk_id;
+                    topk_d.assign((size_t)ln*k2, INF_D);
+                    topk_id.assign((size_t)ln*k2, (id_t)-1);
 
-                auto topk_insert = [&](int row, dist_t dist, id_t id){
-                    dist_t*   rd = topk_d.data()  + (size_t)row*k2;
-                    id_t*     ri = topk_id.data() + (size_t)row*k2;
-                    int worst = 0; dist_t worst_d = rd[0];
-                    for(int t=1;t<k2;++t) if(rd[t]>worst_d){worst_d=rd[t]; worst=t;}
-                    if(dist<worst_d){ rd[worst]=dist; ri[worst]=id; }
-                };
+                    auto topk_insert = [&](int row, dist_t dist, id_t id){
+                        dist_t*   rd = topk_d.data()  + (size_t)row*k2;
+                        id_t*     ri = topk_id.data() + (size_t)row*k2;
+                        int worst = 0; dist_t worst_d = rd[0];
+                        for(int t=1;t<k2;++t) if(rd[t]>worst_d){worst_d=rd[t]; worst=t;}
+                        if(dist<worst_d){ rd[worst]=dist; ri[worst]=id; }
+                    };
 
-                // build_dist(a,b) = 1 - dot(a,b) is symmetric, so each pair
-                // only needs to be computed once (i<j) and fed into both
-                // points' top-k lists — half the distance evaluations the
-                // old full-matrix version did.
-                for(int i=0;i<ln;++i){
-                    const float* ai = ld.data()+(size_t)i*d;
-                    for(int j=i+1;j<ln;++j){
-                        dist_t dij = build_dist(ai, ld.data()+(size_t)j*d, d);
-                        topk_insert(i, dij, (id_t)j);
-                        topk_insert(j, dij, (id_t)i);
+                    // build_dist(a,b) = 1 - dot(a,b) is symmetric, so each
+                    // pair only needs to be computed once (i<j) and fed
+                    // into both points' top-k lists — half the distance
+                    // evaluations the old full-matrix version did.
+                    for(int i=0;i<ln;++i){
+                        const float* ai = ld.data()+(size_t)i*d;
+                        for(int j=i+1;j<ln;++j){
+                            dist_t dij = build_dist(ai, ld.data()+(size_t)j*d, d);
+                            topk_insert(i, dij, (id_t)j);
+                            topk_insert(j, dij, (id_t)i);
+                        }
+                    }
+
+                    auto&elist=batch_edges[local_li]; elist.reserve((size_t)ln*k2);
+                    for(int i=0;i<ln;++i){
+                        dist_t* rd = topk_d.data()  + (size_t)i*k2;
+                        id_t*   ri = topk_id.data() + (size_t)i*k2;
+                        for(int ki=0;ki<k2;++ki){
+                            if(ri[ki]==(id_t)-1) continue; // fewer than k2 neighbours available
+                            int j=(int)ri[ki];
+                            elist.emplace_back(leaf[i],leaf[j],rd[ki]);
+                        }
                     }
                 }
 
-                auto&elist=leaf_edges[li]; elist.reserve((size_t)ln*k2);
-                for(int i=0;i<ln;++i){
-                    dist_t* rd = topk_d.data()  + (size_t)i*k2;
-                    id_t*   ri = topk_id.data() + (size_t)i*k2;
-                    for(int ki=0;ki<k2;++ki){
-                        if(ri[ki]==(id_t)-1) continue; // fewer than k2 neighbours available
-                        int j=(int)ri[ki];
-                        elist.emplace_back(leaf[i],leaf[j],rd[ki]);
+                // Stream this batch's edges straight into the reservoirs —
+                // no intermediate `cands` array at all. hash_pair(sp,sc) is
+                // directional (it thresholds sc against sp per-dimension),
+                // so the two directions need separately computed hashes,
+                // not the same one reused.
+                //
+                // HashReservoir::insert isn't internally synchronized, and
+                // leaves can overlap (rbc_recurse's fanout>1 at the
+                // top/second levels means a point can be touched by more
+                // than one leaf), so naively parallelizing this without any
+                // locking would race. A per-point lock would need another
+                // n-sized array, though — instead, a small FIXED number of
+                // shards (hashed from the point id) makes concurrent
+                // inserts safe while adding only a few KB total, regardless
+                // of n, and lets this step actually use all the cores the
+                // leaf-computation phase just did instead of running single
+                // threaded (this was previously O(total edges * reservoir_cap)
+                // work, entirely serial — the main cost behind "batches are
+                // slow").
+                static std::vector<std::mutex> shard_locks(4096);
+#pragma omp parallel for schedule(dynamic,64)
+                for(int local_li=0; local_li<batch_n; ++local_li){
+                    for(auto&[s,t,dist]:batch_edges[local_li]){
+                        if(s==t) continue; // defensive; should not occur
+                        const float* ss=sketches_.data()+(size_t)s*m;
+                        const float* st=sketches_.data()+(size_t)t*m;
+                        uint16_t h_st = lsh_.hash_pair(ss, st);
+                        uint16_t h_ts = lsh_.hash_pair(st, ss);
+                        {
+                            std::lock_guard<std::mutex> lk(shard_locks[s % shard_locks.size()]);
+                            res[s].insert(h_st, t, dist);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lk(shard_locks[t % shard_locks.size()]);
+                            res[t].insert(h_ts, s, dist);
+                        }
                     }
+                    std::vector<E3>().swap(batch_edges[local_li]);
                 }
-            }
-            auto end_3 = std::chrono::high_resolution_clock::now();
-            auto duration_3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_3 - start_3);
-            printf("Elapsed time: %ld ms\n", duration_3.count());
-            printf("PiPNN 3\n");
-            fflush(stdout);
-            // Merge each leaf's edges into `cands`, then immediately free
-            // that leaf's buffer rather than waiting for the whole
-            // leaf_edges vector-of-vectors to go out of scope at the end of
-            // this replica. Without this, every leaf's edge list AND the
-            // (simultaneously growing) `cands` structure are alive at their
-            // peak size at the same time — this way memory freed on one
-            // side roughly offsets memory growing on the other, so the
-            // peak for this section is ~halved instead of doubled.
-            //
-            // Note: this merge must stay single-threaded. Leaves overlap —
-            // rbc_recurse() can route a point into more than one leaf when
-            // fanout>1 (the top/second recursion levels) — so a point's
-            // cands[] entry can be touched by edges from different leaves,
-            // and concurrently emplace_back-ing into the same cands[i] from
-            // multiple threads would be a data race.
-            for(int li=0;li<nl;++li){
-                for(auto&[s,t,dist]:leaf_edges[li]){
-                    cands[s].emplace_back(dist,t); cands[t].emplace_back(dist,s);
-                }
-                std::vector<E3>().swap(leaf_edges[li]);
-            }
-            printf("PiPNN 4\n");
-            fflush(stdout);
-        }
 
-        std::vector<HashReservoir> res(n);
-#pragma omp parallel for schedule(static)
-        for(int i=0;i<n;++i){
-            res[i].init(cfg_.reservoir_cap);
-            const float*si=sketches_.data()+(size_t)i*m;
-            for(auto&[dist,j]:cands[i]){
-                if(j==(id_t)i)continue;
-                uint16_t h=lsh_.hash_pair(si,sketches_.data()+(size_t)j*m);
-                res[i].insert(h,j,dist);
+                if((start_li/BATCH_LEAVES)%10==0){
+                    printf("Processed batch up to leaf %d/%d\n", end_li, nl);
+                    fflush(stdout);
+                }
             }
         }
-        printf("PiPNN 5\n");
-        fflush(stdout);
-        {decltype(cands)().swap(cands);}
         {std::vector<float>().swap(sketches_);}
-
+        printf("PiPNN 4 - about to init graph (n=%d, R=%d, ~%.2f GB)\n",
+               n, R, (double)n*R*sizeof(id_t)/1e9);
+        fflush(stdout);
         g_.init(n,R);
+        printf("PiPNN graph allocated\n"); fflush(stdout);
         if(cfg_.final_prune){
 #pragma omp parallel for schedule(dynamic,64)
             for(int i=0;i<n;++i){
-                std::vector<std::pair<dist_t,id_t>> c; res[i].flush(c);
-                std::vector<id_t> out2;
+                // Reused per-thread instead of freshly constructed every
+                // iteration: with n in the millions, "declare a fresh
+                // vector each loop iteration" means millions of separate
+                // heap allocations (this is the same class of problem the
+                // earlier leaf_edges/cands fix addressed) — costly in time
+                // (malloc/free churn across threads) and, more importantly
+                // here, a real contributor to heap fragmentation that
+                // inflates actual RSS well past the "live data" size.
+                static thread_local std::vector<std::pair<dist_t,id_t>> c;
+                res[i].flush(c); // flush() already does c.clear() internally
+                res[i].free_buf(); // done with this reservoir's memory
+                static thread_local std::vector<id_t> out2;
+                out2.clear();
                 robust_prune(i,c,dv,cfg_.alpha,R,out2);
                 g_.set(i,out2);
             }
         } else {
 #pragma omp parallel for schedule(static)
             for(int i=0;i<n;++i){
-                std::vector<std::pair<dist_t,id_t>> c; res[i].flush(c);
+                static thread_local std::vector<std::pair<dist_t,id_t>> c;
+                res[i].flush(c);
+                res[i].free_buf(); // done with this reservoir's memory
                 std::sort(c.begin(),c.end());
-                std::vector<id_t> out2;
+                static thread_local std::vector<id_t> out2;
+                out2.clear();
                 for(int j=0,r=std::min((int)c.size(),R);j<r;++j)out2.push_back(c[j].second);
                 g_.set(i,out2);
             }
         }
-        printf("PiPNN final prune done\n");
-        fflush(stdout);
+        printf("PiPNN final pruned\n"); fflush(stdout);
+        // Safety net: every reservoir's slot buffer was already freed
+        // individually above as each point was consumed, so this only
+        // drops the now-empty outer shell (n * sizeof(HashReservoir), a
+        // few dozen MB at most) — but it guarantees `res` is fully gone
+        // before back_edge_pass allocates its own n-sized `back` structure,
+        // rather than the two coexisting at their respective peaks.
+        {std::vector<HashReservoir>().swap(res);}
 
         if(cfg_.back_edge) back_edge_pass(g_, dv, n, cfg_.alpha);
+        printf("PiPNN back edged\n"); fflush(stdout);
 
         entries_=diverse_entries(dv, n, cfg_.k_entry, cfg_.entry_sample, cfg_.seed);
-        printf("PiPNN extras done\n");
-        fflush(stdout);
+        printf("PiPNN diverse entries done\n"); fflush(stdout);
     }
 
     void beam_search(const float* q, int k, int L,
