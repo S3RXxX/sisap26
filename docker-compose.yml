@@ -27,10 +27,6 @@
 #   ./data/<dataset-name>/config.json
 #   ./output/...                       -> mounted at /output (results.h5 lands here)
 #
-# This mirrors exactly what TIRA does at evaluation time — it substitutes
-# $inputDataset (a directory with the .h5 + config.json) and $outputDir
-# into the same --input/--task-description/--output flags. See the
-# Dockerfile header for the full tira-cli code-submission example.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:

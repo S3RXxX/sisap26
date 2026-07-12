@@ -249,13 +249,7 @@ struct HashReservoir {
     void flush(std::vector<std::pair<dist_t,id_t>>& o) const {
         o.clear(); for (int i = 0; i < sz; ++i) o.emplace_back(buf[i].dist, buf[i].id);
     }
-    // Release this reservoir's slot buffer as soon as it's been flushed —
-    // there are n of these, each reservoir_cap slots, so releasing them one
-    // at a time as the graph-build loop consumes each point (rather than
-    // waiting for the whole `res` vector to go out of scope after
-    // back_edge_pass has already allocated its own n-sized structure on
-    // top) is what actually keeps the peak down at multi-million-point
-    // scale.
+
     void free_buf() { std::vector<Slot>().swap(buf); sz = 0; cap = 0; }
 };
 
@@ -609,20 +603,7 @@ public:
     const std::vector<id_t>& entry_points()const{return entries_;}
     struct Stats{double avg_deg,frac_bidir;};
     Stats stats()const{
-        // Previously this built one std::unordered_set per point (n_ of
-        // them) just to answer "is u in v's neighbor list" in O(1). At
-        // millions of points that's not just n_ allocations — libstdc++'s
-        // unordered_set allocates each element as its own individually
-        // heap-allocated node, so a point with degree R contributes R more
-        // separate allocations on top of the set itself. For n=6.5M at
-        // R=64 that's on the order of 400M+ individual small allocations,
-        // purely to print two diagnostic numbers.
-        //
-        // g_ already stores each point's neighbors contiguously (FlatGraph
-        // is a flat array), so "is u in v's neighbor list" is answered by
-        // a direct linear scan over the (small, R-sized) row we already
-        // have — no extra memory at all, at the cost of O(R) instead of
-        // O(1) per check. Parallelized across points to offset that.
+
         long long tot=0, bi=0;
 #pragma omp parallel for schedule(static) reduction(+:tot,bi)
         for(int u=0;u<n_;++u){
@@ -670,18 +651,7 @@ private:
             lsh_.sketch(dv.row(i,buf.data()), sketches_.data()+(size_t)i*m);
         }
 
-        // Reservoirs are allocated once, up front, and streamed into
-        // directly as edges are produced by each batch below — there is no
-        // separate `cands` structure any more. Previously, `cands` (bounded
-        // to cand_cap entries/point) and `res` (reservoir_cap slots/point)
-        // were both fully alive at the same time right when res was being
-        // populated from cands. At millions of points, a "bounded" cands
-        // capped at e.g. 256 entries/point is still n*256*8B — for 6.5M
-        // points that's ~13GB by itself, on top of res's own
-        // n*reservoir_cap*10B. Not materialising cands at all, rather than
-        // just bounding it, is what actually keeps this within a normal
-        // machine's RAM at that scale — res's fixed n*reservoir_cap*10B is
-        // now the only n-sized structure this stage carries.
+
         std::vector<HashReservoir> res(n);
 #pragma omp parallel for schedule(static)
         for(int i=0;i<n;++i) res[i].init(cfg_.reservoir_cap);
@@ -698,18 +668,7 @@ private:
             printf("nl = %d\n", nl); fflush(stdout);
 
             using E3=std::tuple<id_t,id_t,dist_t>; // (s, t, dist) — dist is
-            // the same value for both directions (build_dist is symmetric),
-            // so there's no need for the separate forward/backward fields
-            // the old dense-matrix version carried; that alone drops this
-            // buffer's footprint by 25% (16B -> 12B per edge).
 
-            // Leaves are generated and merged in bounded-size batches, so
-            // at most BATCH_LEAVES leaves' worth of edges are ever resident
-            // at once instead of materialising every leaf's edges for the
-            // whole replica up front. rbc_recurse's fanout>1 overlap at the
-            // top/second recursion levels means nl can run into the
-            // millions (far more than n/leaf_size would suggest), so this
-            // bounds leaf_edges to a small, fixed size regardless of nl.
             const int BATCH_LEAVES = 10000;
             for(int start_li=0; start_li<nl; start_li+=BATCH_LEAVES){
                 int end_li = std::min(start_li+BATCH_LEAVES, nl);
@@ -726,14 +685,7 @@ private:
 
                     int k2=std::min(cfg_.knn_k,ln-1);
 
-                    // Bounded top-k2 accumulator per point, flattened to
-                    // one buffer: ln*k2 slots instead of the old ln*ln
-                    // dense distance matrix (plus its ln*d transpose
-                    // scratch buffer). For leaf_size=1024, knn_k=2 that's a
-                    // ~500x reduction in peak per-leaf memory (2 floats/ids
-                    // per point instead of 1024), and this scratch is
-                    // reused (thread_local) across leaves rather than
-                    // freshly allocated each time.
+
                     static thread_local std::vector<dist_t> topk_d;
                     static thread_local std::vector<id_t>   topk_id;
                     topk_d.assign((size_t)ln*k2, INF_D);
@@ -772,25 +724,6 @@ private:
                     }
                 }
 
-                // Stream this batch's edges straight into the reservoirs —
-                // no intermediate `cands` array at all. hash_pair(sp,sc) is
-                // directional (it thresholds sc against sp per-dimension),
-                // so the two directions need separately computed hashes,
-                // not the same one reused.
-                //
-                // HashReservoir::insert isn't internally synchronized, and
-                // leaves can overlap (rbc_recurse's fanout>1 at the
-                // top/second levels means a point can be touched by more
-                // than one leaf), so naively parallelizing this without any
-                // locking would race. A per-point lock would need another
-                // n-sized array, though — instead, a small FIXED number of
-                // shards (hashed from the point id) makes concurrent
-                // inserts safe while adding only a few KB total, regardless
-                // of n, and lets this step actually use all the cores the
-                // leaf-computation phase just did instead of running single
-                // threaded (this was previously O(total edges * reservoir_cap)
-                // work, entirely serial — the main cost behind "batches are
-                // slow").
                 static std::vector<std::mutex> shard_locks(4096);
 #pragma omp parallel for schedule(dynamic,64)
                 for(int local_li=0; local_li<batch_n; ++local_li){
@@ -827,14 +760,7 @@ private:
         if(cfg_.final_prune){
 #pragma omp parallel for schedule(dynamic,64)
             for(int i=0;i<n;++i){
-                // Reused per-thread instead of freshly constructed every
-                // iteration: with n in the millions, "declare a fresh
-                // vector each loop iteration" means millions of separate
-                // heap allocations (this is the same class of problem the
-                // earlier leaf_edges/cands fix addressed) — costly in time
-                // (malloc/free churn across threads) and, more importantly
-                // here, a real contributor to heap fragmentation that
-                // inflates actual RSS well past the "live data" size.
+
                 static thread_local std::vector<std::pair<dist_t,id_t>> c;
                 res[i].flush(c); // flush() already does c.clear() internally
                 res[i].free_buf(); // done with this reservoir's memory
@@ -857,12 +783,6 @@ private:
             }
         }
         printf("PiPNN final pruned\n"); fflush(stdout);
-        // Safety net: every reservoir's slot buffer was already freed
-        // individually above as each point was consumed, so this only
-        // drops the now-empty outer shell (n * sizeof(HashReservoir), a
-        // few dozen MB at most) — but it guarantees `res` is fully gone
-        // before back_edge_pass allocates its own n-sized `back` structure,
-        // rather than the two coexisting at their respective peaks.
         {std::vector<HashReservoir>().swap(res);}
 
         if(cfg_.back_edge) back_edge_pass(g_, dv, n, cfg_.alpha);

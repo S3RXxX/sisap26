@@ -55,20 +55,7 @@ mkdir -p "${WORK_DIR}"
 # ── Resolve dataset paths from config_pipnn.json ─────────────────────────────
 # config_pipnn.json  -> {"input": "<h5 file>", "task_description": "<config.json>"}
 #
-# Paths in config_pipnn.json may be given as absolute container paths
-# (e.g. "/data/wikipedia-small/...") or as paths relative to the mounted
-# data volume. The expected default layout is flat under /data, e.g.
-#   ./data/wikipedia-small/benchmark-dev-wikipedia-bge-m3-small.h5
-#   ./data/wikipedia-small/config.json
-# with config_pipnn.json listing "wikipedia-small/..." (no leading /data/,
-# added automatically below). The older "data/sisap_work/wikipedia-small/..."
-# convention (with a literal "data/" prefix baked into the JSON) still
-# resolves correctly too — that leading "data/" is stripped before /data is
-# prepended, so it lands in the same place either way.
-#
-# This is what the earlier version got wrong: a relative path in the JSON
-# was being resolved against /app (the image's WORKDIR) instead of /data
-# (the actual mount point), so it silently looked in the wrong place.
+
 resolve_path() {
     local p="$1"
     if [[ "$p" = /* ]]; then
