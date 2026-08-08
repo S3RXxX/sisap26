@@ -16,4 +16,11 @@ To build our project:
 - docker build -t pipnn-sisap .
 
 To execute our solution with the best parameters found:
-- docker run --rm -v ${PWD}/data:/data -e K=15 -e RAND=1 -e BEAM_WIDTH=32 -e MAX_DEGREE=64 -e MIN_LEAF_SIZE=16 -e LEAF_SIZE=32 -e ALPHA=1.1 -e NUM_THREADS=0 -e NUM_THREADS=0 -e MEMORY_LIMIT_GB=16 -e COOCKED=0 pipnn-sisap
+- docker run --rm -v ${PWD}/data:/data -e K=15 -e BEAM_WIDTH=32 -e ALPHA=1.2 -e LEAF_SIZE=512 -e MIN_LEAF_SIZE=32 -e FINAL_PRUNE=0 -e BACK_EDGE=0 pipnn-sisap
+
+## Files
+- pipnn_dot.hpp: Has our implementation of PIPNN.
+- sisap_bench.cpp: Execute PIPNN for train and the different tests from SISAP 2026 Indexing Challenge.
+- run_sisap2026.py: Compile and execute sisap_bench.cpp.
+- sweep.py: Experimentation code that uses the docker.
+- *.ipynb: Code used to create images.
